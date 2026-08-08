@@ -1,5 +1,5 @@
 // ============================================================
-// DOMU — Conector Local Omie (v2)
+// DOMU — Conector Local Omie (v3)
 // Servidor Node.js que faz a ponte entre o HTML e a API Omie
 // Rode com: node conector-omie.js
 // ============================================================
@@ -33,24 +33,24 @@ function chamarOmie(endpoint, call, param) {
       }
     };
 
-    console.log('[OMIE] ' + call + ' -> ' + endpoint);
+    console.log('[OMIE] ' + call + ' -> /api/v1/' + endpoint);
+    console.log('[OMIE] Body: ' + body.substring(0, 300));
 
     const req = https.request(opcoes, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
+        console.log('[OMIE] Status: ' + res.statusCode + ' | Resposta: ' + data.substring(0, 500));
         try {
           const json = JSON.parse(data);
           if (json.faultstring) {
-            console.log('[OMIE] ERRO: ' + json.faultstring);
+            console.log('[OMIE] FAULT: ' + json.faultstring);
             reject(new Error(json.faultstring));
           } else {
-            console.log('[OMIE] OK (' + data.length + ' bytes)');
             resolve(json);
           }
         } catch (e) {
-          console.log('[OMIE] Resposta invalida: ' + data.substring(0, 200));
-          reject(new Error('Resposta invalida do Omie'));
+          reject(new Error('Resposta invalida do Omie: ' + data.substring(0, 100)));
         }
       });
     });
@@ -61,7 +61,7 @@ function chamarOmie(endpoint, call, param) {
     });
     req.setTimeout(20000, () => {
       req.destroy();
-      reject(new Error('Timeout: o Omie demorou mais de 20 segundos para responder.'));
+      reject(new Error('Timeout: o Omie demorou mais de 20s para responder.'));
     });
     req.write(body);
     req.end();
@@ -74,6 +74,26 @@ function lerBody(req) {
     req.on('data', chunk => body += chunk);
     req.on('end', () => resolve(body));
   });
+}
+
+function extrairProdutos(resultado) {
+  // A API Omie pode retornar em diferentes formatos dependendo da versão
+  return resultado.produto_servico_cadastro
+    || resultado.produto_servico_list
+    || resultado.produtos
+    || resultado.cadastros
+    || [];
+}
+
+function mapearProduto(p) {
+  return {
+    id: String(p.codigo_produto_integracao || p.codigo_produto || p.codigo || ''),
+    codigo: p.codigo_produto || p.codigo || '',
+    descricao: p.descricao || p.descricao_familia || '',
+    unidade: p.unidade || '',
+    ncm: p.ncm || '',
+    valorUnitario: p.valor_unitario || p.preco_unitario || 0
+  };
 }
 
 async function tratarRequisicao(req, res) {
@@ -112,22 +132,25 @@ async function tratarRequisicao(req, res) {
         return responderJson(400, { error: 'Informe App Key e App Secret.' });
       }
 
-      console.log('[TEST] Testando com App Key: ' + appKey.slice(0, 4) + '****');
+      console.log('\n[TEST] Testando conexao...');
 
+      // Tenta ListarProdutos com parametros minimos
       const resultado = await chamarOmie('geral/produtos/', 'ListarProdutos', {
         pagina: 1,
         registros_por_pagina: 1,
         apenas_importado_api: 'N'
       });
 
+      const produtos = extrairProdutos(resultado);
       conectado = true;
-      const produto = (resultado.produto_servico_cadastro || [])[0] || {};
+      const produto = produtos[0] || {};
 
-      console.log('[TEST] Conexao OK! Produto teste: ' + (produto.codigo_produto || 'nenhum'));
+      console.log('[TEST] OK! Total paginas: ' + (resultado.total_de_paginas || '?'));
+      console.log('[TEST] Primeiro produto: ' + JSON.stringify(produto).substring(0, 200));
 
       return responderJson(200, {
         connected: true,
-        produtoTesteCodigo: produto.codigo_produto || '—',
+        produtoTesteCodigo: produto.codigo_produto || produto.codigo || '—',
         produtoTesteId: String(produto.codigo_produto_integracao || produto.codigo_produto || ''),
         custoTeste: produto.valor_unitario || 0,
         appKeyMasked: appKey.slice(0, 4) + '****' + appKey.slice(-2)
@@ -140,55 +163,60 @@ async function tratarRequisicao(req, res) {
       const q = (parsed.query.q || '').trim();
       if (q.length < 2) return responderJson(400, { error: 'Digite pelo menos 2 caracteres.' });
 
-      console.log('[BUSCA] Pesquisando: "' + q + '"');
+      console.log('\n[BUSCA] Pesquisando: "' + q + '"');
 
-      // Busca por descrição
-      let produtosDesc = [];
+      const todosResultados = [];
+
+      // Tentativa 1: ListarProdutos sem filtro e buscar localmente
       try {
+        // Carrega mais produtos e filtra no servidor
         const r1 = await chamarOmie('geral/produtos/', 'ListarProdutos', {
           pagina: 1,
-          registros_por_pagina: 20,
-          apenas_importado_api: 'N',
-          filtrar_por_descricao: q
+          registros_por_pagina: 500,
+          apenas_importado_api: 'N'
         });
-        produtosDesc = r1.produto_servico_cadastro || [];
+        const lista = extrairProdutos(r1);
+        console.log('[BUSCA] ListarProdutos retornou ' + lista.length + ' produtos');
+
+        // Filtra localmente por código ou descrição
+        const termoLower = q.toLowerCase();
+        const filtrados = lista.filter(p => {
+          const codigo = String(p.codigo_produto || p.codigo || '').toLowerCase();
+          const descricao = String(p.descricao || '').toLowerCase();
+          return codigo.includes(termoLower) || descricao.includes(termoLower);
+        });
+        console.log('[BUSCA] ' + filtrados.length + ' produtos apos filtro local');
+        todosResultados.push(...filtrados);
       } catch (e) {
-        console.log('[BUSCA] Erro busca por descricao: ' + e.message);
+        console.log('[BUSCA] Erro ListarProdutos: ' + e.message);
       }
 
-      // Busca por código
-      let produtosCod = [];
-      try {
-        const r2 = await chamarOmie('geral/produtos/', 'ListarProdutos', {
-          pagina: 1,
-          registros_por_pagina: 10,
-          apenas_importado_api: 'N',
-          filtrar_por_codigo: q
-        });
-        produtosCod = r2.produto_servico_cadastro || [];
-      } catch (e) {
-        console.log('[BUSCA] Erro busca por codigo: ' + e.message);
-      }
-
-      // Consolida sem duplicatas
-      const todos = [...produtosDesc, ...produtosCod];
-      const unicos = new Map();
-      todos.forEach(p => {
-        const chave = String(p.codigo_produto_integracao || p.codigo_produto || '');
-        if (chave && !unicos.has(chave)) {
-          unicos.set(chave, {
-            id: chave,
-            codigo: p.codigo_produto || '',
-            descricao: p.descricao || p.descricao_familia || '',
-            unidade: p.unidade || '',
-            ncm: p.ncm || '',
-            valorUnitario: p.valor_unitario || 0
+      // Tentativa 2: ConsultarProduto direto por código (caso seja código exato)
+      if (todosResultados.length === 0) {
+        try {
+          const r2 = await chamarOmie('geral/produtos/', 'ConsultarProduto', {
+            codigo_produto: q
           });
+          if (r2 && r2.codigo_produto) {
+            todosResultados.push(r2);
+            console.log('[BUSCA] ConsultarProduto encontrou: ' + r2.codigo_produto);
+          }
+        } catch (e) {
+          console.log('[BUSCA] ConsultarProduto por codigo nao encontrou');
+        }
+      }
+
+      // Remove duplicatas
+      const unicos = new Map();
+      todosResultados.forEach(p => {
+        const chave = String(p.codigo_produto_integracao || p.codigo_produto || p.codigo || Math.random());
+        if (!unicos.has(chave)) {
+          unicos.set(chave, mapearProduto(p));
         }
       });
 
-      const resultado = Array.from(unicos.values());
-      console.log('[BUSCA] ' + resultado.length + ' produtos encontrados');
+      const resultado = Array.from(unicos.values()).slice(0, 30);
+      console.log('[BUSCA] Retornando ' + resultado.length + ' produtos\n');
       return responderJson(200, { produtos: resultado });
     }
 
@@ -196,24 +224,18 @@ async function tratarRequisicao(req, res) {
     if (caminho === '/api/omie/materiais') {
       if (!conectado) return responderJson(400, { error: 'Teste a conexao primeiro.' });
 
-      console.log('[MATERIAIS] Carregando lista completa...');
+      console.log('\n[MATERIAIS] Carregando lista...');
 
       const resultado = await chamarOmie('geral/produtos/', 'ListarProdutos', {
         pagina: 1,
-        registros_por_pagina: 50,
+        registros_por_pagina: 500,
         apenas_importado_api: 'N'
       });
 
-      const produtos = (resultado.produto_servico_cadastro || []).map(p => ({
-        id: String(p.codigo_produto_integracao || p.codigo_produto || ''),
-        codigo: p.codigo_produto || '',
-        descricao: p.descricao || '',
-        unidade: p.unidade || '',
-        ncm: p.ncm || '',
-        valorUnitario: p.valor_unitario || 0
-      }));
+      const lista = extrairProdutos(resultado);
+      const produtos = lista.map(mapearProduto);
 
-      console.log('[MATERIAIS] ' + produtos.length + ' produtos carregados');
+      console.log('[MATERIAIS] ' + produtos.length + ' produtos carregados\n');
       return responderJson(200, { produtos });
     }
 
@@ -223,56 +245,36 @@ async function tratarRequisicao(req, res) {
       const id = (parsed.query.id || '').trim();
       const codigo = (parsed.query.codigo || '').trim();
 
-      console.log('[COMPRA] Buscando produto id=' + id + ' codigo=' + codigo);
+      console.log('\n[COMPRA] Buscando id="' + id + '" codigo="' + codigo + '"');
 
       let produto = null;
 
-      // Tenta consultar por código
       if (codigo) {
         try {
           const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', {
             codigo_produto: codigo
           });
           if (r && r.codigo_produto) {
-            produto = {
-              id: String(r.codigo_produto_integracao || r.codigo_produto || ''),
-              codigo: r.codigo_produto || codigo,
-              descricao: r.descricao || '',
-              unidade: r.unidade || '',
-              ncm: r.ncm || '',
-              valorUnitario: r.valor_unitario || 0
-            };
+            produto = mapearProduto(r);
+            console.log('[COMPRA] Encontrado por codigo: ' + produto.descricao);
           }
         } catch (e) {
-          console.log('[COMPRA] Erro ConsultarProduto por codigo: ' + e.message);
+          console.log('[COMPRA] Nao encontrou por codigo: ' + e.message);
         }
       }
 
-      // Se não achou por código, tenta por ID interno
       if (!produto && id) {
         try {
           const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', {
             codigo_produto_integracao: id
           });
           if (r && r.codigo_produto) {
-            produto = {
-              id: String(r.codigo_produto_integracao || r.codigo_produto || ''),
-              codigo: r.codigo_produto || '',
-              descricao: r.descricao || '',
-              unidade: r.unidade || '',
-              ncm: r.ncm || '',
-              valorUnitario: r.valor_unitario || 0
-            };
+            produto = mapearProduto(r);
+            console.log('[COMPRA] Encontrado por id: ' + produto.descricao);
           }
         } catch (e) {
-          console.log('[COMPRA] Erro ConsultarProduto por id: ' + e.message);
+          console.log('[COMPRA] Nao encontrou por id: ' + e.message);
         }
-      }
-
-      if (produto) {
-        console.log('[COMPRA] Produto encontrado: ' + produto.codigo + ' - ' + produto.descricao);
-      } else {
-        console.log('[COMPRA] Produto nao encontrado');
       }
 
       return responderJson(200, {
@@ -295,8 +297,6 @@ async function tratarRequisicao(req, res) {
       });
     }
 
-    // ============ ROTA NÃO ENCONTRADA ============
-    console.log('[404] Rota nao encontrada: ' + caminho);
     responderJson(404, { error: 'Rota nao encontrada: ' + caminho });
 
   } catch (erro) {
@@ -309,13 +309,12 @@ const servidor = http.createServer(tratarRequisicao);
 servidor.listen(PORTA, () => {
   console.log('');
   console.log('  =============================================');
-  console.log('    DOMU - Conector Omie v2');
+  console.log('    DOMU - Conector Omie v3');
   console.log('    Porta: ' + PORTA);
   console.log('    URL: http://localhost:' + PORTA);
   console.log('  =============================================');
   console.log('');
   console.log('  Mantenha esta janela aberta enquanto usa o DOMU.');
-  console.log('  Logs de comunicacao aparecerao aqui.');
-  console.log('  Para fechar, pressione Ctrl+C');
+  console.log('  Logs aparecerao aqui abaixo.');
   console.log('');
 });
