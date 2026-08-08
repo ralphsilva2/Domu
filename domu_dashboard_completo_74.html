@@ -5202,39 +5202,45 @@ function analisarAproveitamentoChapas(grupo) {
   const referencia = grupo.itens[0]?.calculo;
   const larguraChapa = referencia?.dimensoesComerciais?.largura || 0;
   const comprimentoChapa = referencia?.dimensoesComerciais?.comprimento || 0;
-  const pecasRetangulares = [];
+  let totalChapas = 0;
   let pecasNaoAcomodadas = 0;
   const motivos = [];
   grupo.itens.forEach(({ peca, calculo }) => {
-    const comprimento = parseFloat(peca.dims?.['chapa-comp']) || 0;
-    const largura = parseFloat(peca.dims?.['chapa-larg']) || 0;
+    const comp = parseFloat(peca.dims?.["chapa-comp"]) || 0;
+    const larg = parseFloat(peca.dims?.["chapa-larg"]) || 0;
     const quantidade = Math.max(0, Math.round(calculo.totalPcs));
-    const cabe = comprimento > 0 && largura > 0 && (
-      (comprimento <= comprimentoChapa && largura <= larguraChapa)
-      || (largura <= comprimentoChapa && comprimento <= larguraChapa)
-    );
-    if (!cabe) {
+    const cabeNormal = comp > 0 && larg > 0 && comp <= comprimentoChapa && larg <= larguraChapa;
+    const cabeGirado = comp > 0 && larg > 0 && larg <= comprimentoChapa && comp <= larguraChapa;
+    if (!cabeNormal && !cabeGirado) {
       pecasNaoAcomodadas += quantidade;
-      motivos.push(calculo.motivoIncompatibilidade || ('A peça “' + peca.nome + '” não cabe na chapa comercial.'));
+      motivos.push(calculo.motivoIncompatibilidade || ('A peça "' + peca.nome + '" não cabe na chapa comercial.'));
       return;
     }
-    for (let i = 0; i < quantidade; i += 1) {
-      pecasRetangulares.push({ w: largura, h: comprimento, pecaId: peca.id });
+    const pcNormal = cabeNormal ? Math.floor(larguraChapa / larg) * Math.floor(comprimentoChapa / comp) : 0;
+    const pcInv = cabeGirado ? Math.floor(larguraChapa / comp) * Math.floor(comprimentoChapa / larg) : 0;
+    const pcCH = Math.max(pcNormal, pcInv);
+    if (pcCH > 0) {
+      totalChapas += Math.ceil(quantidade / pcCH);
+    } else {
+      pecasNaoAcomodadas += quantidade;
     }
   });
-  const chapas = encaixarRetangulosEmChapas(pecasRetangulares, larguraChapa, comprimentoChapa);
-  const areaUsada = pecasRetangulares.reduce((total, peca) => total + peca.w * peca.h, 0);
-  const areaComprada = chapas.length * larguraChapa * comprimentoChapa;
+  const areaUsada = grupo.itens.reduce((total, { peca, calculo }) => {
+    const comp = parseFloat(peca.dims?.["chapa-comp"]) || 0;
+    const larg = parseFloat(peca.dims?.["chapa-larg"]) || 0;
+    return total + comp * larg * Math.max(0, Math.round(calculo.totalPcs));
+  }, 0);
+  const areaComprada = totalChapas * larguraChapa * comprimentoChapa;
   return {
     tipo: 'chapa',
     compativel: pecasNaoAcomodadas === 0,
     motivoIncompatibilidade: motivos[0] || '',
     pecasNaoAcomodadas,
-    quantidadeFisicaCompra: chapas.length,
+    quantidadeFisicaCompra: totalChapas,
     quantidadeMetros: 0,
     aproveitamento: areaComprada > 0 ? areaUsada / areaComprada : 0,
     sobra: Math.max(0, areaComprada - areaUsada),
-    pesoCompra: chapas.length * (referencia?.pesoCompraUnitario || 0),
+    pesoCompra: totalChapas * (referencia?.pesoCompraUnitario || 0),
     dimensaoTexto: fmtInt(comprimentoChapa) + ' × ' + fmtInt(larguraChapa) + ' mm'
   };
 }
