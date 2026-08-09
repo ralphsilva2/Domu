@@ -28,6 +28,7 @@ let cacheProdutos = [];
 let cacheTimestamp = 0;
 let cacheCarregando = false;
 
+
 // ============================================================
 // LOGGING
 // ============================================================
@@ -92,6 +93,7 @@ function chamarOmie(endpoint, call, param) {
   });
 }
 
+
 // ============================================================
 // LER BODY DO REQUEST
 // ============================================================
@@ -150,6 +152,7 @@ async function carregarTodosProdutos() {
   return todos;
 }
 
+
 // ============================================================
 // CACHE DE PRODUTOS
 // ============================================================
@@ -163,7 +166,6 @@ async function obterProdutosCache(forceRefresh = false) {
   }
 
   if (cacheCarregando) {
-    // Espera o carregamento em andamento
     log('CACHE', 'Aguardando carregamento em andamento...');
     while (cacheCarregando) {
       await new Promise(r => setTimeout(r, 200));
@@ -215,6 +217,7 @@ function servirArquivo(res, filePath) {
   }
 }
 
+
 // ============================================================
 // UTILITÁRIOS DE RESPOSTA
 // ============================================================
@@ -229,6 +232,262 @@ function erroOmie(res, err) {
   }
   return jsonResponse(res, 500, { error: err.message });
 }
+
+// ============================================================
+// UTILITÁRIO DE DATA — formato DD/MM/YYYY
+// ============================================================
+function dataHoje() {
+  const d = new Date();
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+function data2AnosAtras() {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - 2);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+// Converte DD/MM/YYYY para Date para comparacao
+function parseDataBR(str) {
+  if (!str) return new Date(0);
+  const partes = str.split('/');
+  if (partes.length !== 3) return new Date(0);
+  return new Date(Number(partes[2]), Number(partes[1]) - 1, Number(partes[0]));
+}
+
+
+// ============================================================
+// ÚLTIMA COMPRA — Busca dados reais de NF-e de entrada
+// ============================================================
+// FLUXO:
+// 1. ConsultarProduto(codigo) → info do produto + idProd
+// 2. ListarMovimentoEstoque(idProd, 2 anos) → filtra operacao 21/22,
+//    exclui cancelamento=S, ordena por dtEmissao desc → pega mais recente
+// 3. SE movimento encontrado com idDoc:
+//    a. ConsultarNotaEnt(idDoc) → detalhes da nota de entrada
+//    b. Localiza item em nota.produtos onde nCodProd === idProd
+//    c. Extrai nValUnit (CUSTO REAL)
+//    d. Extrai ICMS, IPI, PIS, COFINS do item
+//    e. Extrai numNFe, dtEmissao do cabec
+// 4. SE movimento encontrado com idRecebimento:
+//    a. ConsultarRecebimento(idRecebimento) → fornecedor, NF-e info
+// 5. PosicaoEstoque(idProd) → saldo, cmc, fisico, reservado
+// 6. Retorna resposta completa
+//
+// HIERARQUIA DE FALLBACK:
+// 1. "ultima_compra_nota_entrada" — nValUnit da ConsultarNotaEnt (PREFERIDO)
+// 2. "ultima_compra_movimento" — valor/qtde do movimento (se nota inacessivel)
+// 3. "sem_ultima_compra" — sem historico de compra (custoUnitario = 0)
+//
+// NUNCA usa valor_unitario do ConsultarProduto como custoUnitario.
+// ============================================================
+
+async function buscarUltimaCompra(idProd, codigoProduto) {
+  const resultado = {
+    fonteCusto: 'sem_ultima_compra',
+    custoUnitario: 0,
+    custoLiquidoUnitario: 0,
+    dataUltimaCompra: '',
+    numeroNota: '',
+    fornecedor: '',
+    idDocumentoOmie: '',
+    idRecebimentoOmie: '',
+    ipi: null,
+    icms: null,
+    pisCofins: null,
+    fiscalCompraCompleto: false,
+    tributosOrigem: '',
+    valorUnitarioNota: 0,
+    cmc: 0,
+    saldo: 0,
+    fisico: 0,
+    reservado: 0,
+    dataEstoque: '',
+    criterioSelecao: '',
+    criterioVinculo: '',
+    tratamentoFiscal: null,
+    codigoProdutoNfe: codigoProduto || '',
+    descricaoProdutoNfe: ''
+  };
+
+  // --- PASSO 2: ListarMovimentoEstoque ---
+  let movimentoCompra = null;
+  try {
+    log('OMIE', `ListarMovimentoEstoque idProd=${idProd} ultimos 2 anos`);
+    const movResp = await chamarOmie('estoque/consulta/', 'ListarMovimentoEstoque', {
+      idProd: Number(idProd),
+      dDtInicial: data2AnosAtras(),
+      dDtFinal: dataHoje(),
+      nPagina: 1,
+      nRegPorPagina: 500
+    });
+
+    const movimentos = movResp.movimentos || [];
+    // Filtra: operacao 21 ou 22, exclui cancelamento=S
+    const compras = movimentos.filter(m =>
+      (m.operacao === '21' || m.operacao === '22') &&
+      m.cancelamento !== 'S'
+    );
+
+    // Ordena por dtEmissao desc (mais recente primeiro)
+    compras.sort((a, b) => {
+      const dA = parseDataBR(a.dtEmissao);
+      const dB = parseDataBR(b.dtEmissao);
+      return dB.getTime() - dA.getTime();
+    });
+
+    if (compras.length > 0) {
+      movimentoCompra = compras[0];
+      log('OMIE', `Movimento compra encontrado: idMov=${movimentoCompra.idMov} dtEmissao=${movimentoCompra.dtEmissao} numDoc=${movimentoCompra.numDoc}`);
+    } else {
+      log('OMIE', 'Nenhum movimento de compra encontrado');
+    }
+  } catch (e) {
+    log('OMIE', `ListarMovimentoEstoque falhou: ${e.message}`);
+  }
+
+
+  // --- PASSO 3: ConsultarNotaEnt (se movimento com idDoc) ---
+  let notaEncontrada = false;
+  if (movimentoCompra && movimentoCompra.idDoc) {
+    try {
+      log('OMIE', `ConsultarNotaEnt nIdNota=${movimentoCompra.idDoc}`);
+      const notaResp = await chamarOmie('produtos/notaentrada/', 'ConsultarNotaEnt', {
+        nIdNota: movimentoCompra.idDoc
+      });
+
+      const cabec = notaResp.cabec || {};
+      const produtos = notaResp.produtos || [];
+
+      // Localiza item na nota pelo nCodProd
+      const itemNota = produtos.find(p => p.nCodProd === Number(idProd));
+
+      if (itemNota) {
+        resultado.fonteCusto = 'ultima_compra_nota_entrada';
+        resultado.custoUnitario = itemNota.nValUnit || 0;
+        resultado.custoLiquidoUnitario = itemNota.nValUnit || 0;
+        resultado.valorUnitarioNota = itemNota.nValUnit || 0;
+        resultado.dataUltimaCompra = cabec.dtEmissao || movimentoCompra.dtEmissao || '';
+        resultado.numeroNota = cabec.cNumNFe || movimentoCompra.numDoc || '';
+        resultado.fornecedor = cabec.cNomeFornecedor || '';
+        resultado.idDocumentoOmie = String(movimentoCompra.idDoc || '');
+        resultado.idRecebimentoOmie = String(movimentoCompra.idRecebimento || '');
+        resultado.codigoProdutoNfe = itemNota.cCodigo || codigoProduto || '';
+        resultado.descricaoProdutoNfe = itemNota.cDescricao || '';
+        resultado.criterioSelecao = 'maior_data_emissao';
+        resultado.criterioVinculo = 'nota_entrada_item';
+        resultado.tributosOrigem = 'nota_entrada';
+        resultado.fiscalCompraCompleto = true;
+
+        // Extrai tributos
+        if (itemNota.ICMS) {
+          resultado.icms = itemNota.ICMS.nAliqICMS != null ? itemNota.ICMS.nAliqICMS : null;
+        }
+        if (itemNota.IPI) {
+          resultado.ipi = itemNota.IPI.nAliqIPI != null ? itemNota.IPI.nAliqIPI : null;
+        }
+        if (itemNota.PIS || itemNota.COFINS) {
+          const pis = (itemNota.PIS && itemNota.PIS.nAliqPIS != null) ? itemNota.PIS.nAliqPIS : 0;
+          const cofins = (itemNota.COFINS && itemNota.COFINS.nAliqCOFINS != null) ? itemNota.COFINS.nAliqCOFINS : 0;
+          resultado.pisCofins = pis + cofins;
+        }
+
+        // Tratamento fiscal (custos)
+        if (itemNota.custos) {
+          resultado.tratamentoFiscal = {
+            cICMSCusto: itemNota.custos.cICMSCusto || 'N',
+            cIPICusto: itemNota.custos.cIPICusto || 'N',
+            cPISCusto: itemNota.custos.cPISCusto || 'N',
+            cCOFINSCusto: itemNota.custos.cCOFINSCusto || 'N'
+          };
+        }
+
+        notaEncontrada = true;
+        log('OMIE', `Nota entrada OK: nValUnit=${itemNota.nValUnit} NF=${cabec.cNumNFe}`);
+      } else {
+        log('OMIE', `Item nCodProd=${idProd} nao encontrado na nota ${movimentoCompra.idDoc}`);
+      }
+    } catch (e) {
+      log('OMIE', `ConsultarNotaEnt falhou: ${e.message}`);
+    }
+  }
+
+
+  // --- FALLBACK: usa valor do movimento se nota nao acessivel ---
+  if (!notaEncontrada && movimentoCompra) {
+    const valorUnitRaw = (movimentoCompra.qtde && movimentoCompra.qtde > 0)
+      ? movimentoCompra.valor / movimentoCompra.qtde
+      : movimentoCompra.valor || 0;
+    // Arredonda para 2 casas decimais para evitar imprecisao de ponto flutuante
+    const valorUnit = Math.round(valorUnitRaw * 100) / 100;
+
+    resultado.fonteCusto = 'ultima_compra_movimento';
+    resultado.custoUnitario = valorUnit;
+    resultado.custoLiquidoUnitario = valorUnit;
+    resultado.valorUnitarioNota = valorUnit;
+    resultado.dataUltimaCompra = movimentoCompra.dtEmissao || movimentoCompra.dtMov || '';
+    resultado.numeroNota = movimentoCompra.numDoc || '';
+    resultado.idDocumentoOmie = String(movimentoCompra.idDoc || '');
+    resultado.idRecebimentoOmie = String(movimentoCompra.idRecebimento || '');
+    resultado.criterioSelecao = 'maior_data_emissao';
+    resultado.criterioVinculo = 'movimento_estoque';
+    resultado.tributosOrigem = 'nao_disponivel';
+    resultado.fiscalCompraCompleto = false;
+
+    log('OMIE', `Fallback movimento: valorUnit=${valorUnit.toFixed(2)} dtEmissao=${movimentoCompra.dtEmissao}`);
+  }
+
+  // --- PASSO 4: ConsultarRecebimento (se idRecebimento disponivel) ---
+  if (movimentoCompra && movimentoCompra.idRecebimento) {
+    try {
+      log('OMIE', `ConsultarRecebimento nIdReceb=${movimentoCompra.idRecebimento}`);
+      const recResp = await chamarOmie('produtos/recebimentonfe/', 'ConsultarRecebimento', {
+        nIdReceb: movimentoCompra.idRecebimento
+      });
+
+      if (recResp) {
+        if (!resultado.fornecedor) {
+          resultado.fornecedor = recResp.cRazaoSocial || recResp.cNome || '';
+        }
+        if (!resultado.numeroNota && recResp.cNumeroNFe) {
+          resultado.numeroNota = recResp.cNumeroNFe;
+        }
+      }
+    } catch (e) {
+      log('OMIE', `ConsultarRecebimento falhou: ${e.message}`);
+    }
+  }
+
+
+  // --- PASSO 5: PosicaoEstoque ---
+  try {
+    log('OMIE', `PosicaoEstoque nCodProd=${idProd}`);
+    const estResp = await chamarOmie('estoque/consulta/', 'PosicaoEstoque', {
+      nCodProd: Number(idProd),
+      codigo_local_estoque: 0
+    });
+
+    if (estResp) {
+      resultado.cmc = estResp.cmc || 0;
+      resultado.saldo = estResp.saldo || 0;
+      resultado.fisico = estResp.fisico || 0;
+      resultado.reservado = estResp.reservado || 0;
+      resultado.dataEstoque = dataHoje();
+      log('OMIE', `Estoque: saldo=${resultado.saldo} cmc=${resultado.cmc} fisico=${resultado.fisico}`);
+    }
+  } catch (e) {
+    log('OMIE', `PosicaoEstoque falhou: ${e.message}`);
+  }
+
+  return resultado;
+}
+
 
 // ============================================================
 // HANDLER PRINCIPAL
@@ -256,6 +515,7 @@ async function handler(req, res) {
     log('DOMU', '200 OK');
     return jsonResponse(res, 200, resultado);
   }
+
 
   // POST /api/omie/test
   if (caminho === '/api/omie/test' && req.method === 'POST') {
@@ -300,6 +560,7 @@ async function handler(req, res) {
     }
   }
 
+
   // GET /api/omie/produtos?q=PSAI
   if (caminho === '/api/omie/produtos' && req.method === 'GET') {
     const q = (parsed.query.q || '').trim().toLowerCase();
@@ -334,6 +595,7 @@ async function handler(req, res) {
     }
   }
 
+
   // GET /api/omie/materiais?categoria=chapa-psai
   if (caminho === '/api/omie/materiais' && req.method === 'GET') {
     const categoria = (parsed.query.categoria || '').trim().toLowerCase();
@@ -347,11 +609,8 @@ async function handler(req, res) {
     try {
       const todos = await obterProdutosCache();
 
-      // Filtro por categoria (futuro — por enquanto retorna todos)
       let filtrados = todos;
       if (categoria) {
-        // Implementacao futura de filtro por categoria
-        // Por enquanto, pode-se usar como filtro simples no codigo/descricao
         const termoCategoria = categoria.replace(/-/g, ' ').replace(/chapa\s*/i, '');
         if (termoCategoria.length >= 2) {
           filtrados = todos.filter(p => {
@@ -370,7 +629,19 @@ async function handler(req, res) {
     }
   }
 
+
   // GET /api/omie/produto-compra?id=xxx&codigo=yyy
+  // ============================================================
+  // FLUXO "ÚLTIMA COMPRA":
+  // 1. ConsultarProduto → info do produto + idProd (codigo_produto_integracao)
+  // 2. ListarMovimentoEstoque → filtra compras (op 21/22), mais recente
+  // 3. ConsultarNotaEnt → nValUnit real da NF-e (PREFERIDO)
+  //    FALLBACK: valor/qtde do movimento
+  // 4. ConsultarRecebimento → dados do fornecedor
+  // 5. PosicaoEstoque → saldo, cmc, fisico, reservado
+  //
+  // NUNCA usa valor_unitario do cadastro como custo de compra.
+  // ============================================================
   if (caminho === '/api/omie/produto-compra' && req.method === 'GET') {
     const id = (parsed.query.id || '').trim();
     const codigo = (parsed.query.codigo || '').trim();
@@ -388,107 +659,83 @@ async function handler(req, res) {
 
     try {
       let produto = null;
-      let produtoOmie = null;
+      let idProd = null;
 
-      // 1. Tenta ConsultarProduto por codigo
+      // --- PASSO 1: ConsultarProduto ---
       if (codigo) {
         try {
           log('OMIE', `ConsultarProduto codigo_produto="${codigo}"`);
           const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
           if (r && r.codigo_produto) {
-            produtoOmie = r;
             produto = mapProduto(r);
+            idProd = r.codigo_produto_integracao || r.codigo_produto;
           }
         } catch (e) {
           log('DOMU', `ConsultarProduto por codigo falhou: ${e.message}`);
         }
       }
 
-      // 2. Se nao achou, tenta por codigo_produto_integracao (id)
       if (!produto && id) {
         try {
           log('OMIE', `ConsultarProduto codigo_produto_integracao="${id}"`);
           const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto_integracao: id });
           if (r && r.codigo_produto) {
-            produtoOmie = r;
             produto = mapProduto(r);
+            idProd = r.codigo_produto_integracao || r.codigo_produto;
           }
         } catch (e) {
           log('DOMU', `ConsultarProduto por id falhou: ${e.message}`);
         }
       }
 
-      // Estrutura de compra padrao
-      let compra = {
-        fonteCusto: 'nao_encontrado',
-        custoUnitario: 0,
-        custoLiquidoUnitario: 0,
-        dataUltimaCompra: '',
-        numeroNota: '',
-        cmc: 0,
-        saldo: 0,
-        dataEstoque: '',
-        ipi: 0,
-        icms: 0,
-        pisCofins: 0,
-        fiscalCompraCompleto: false,
-        tributosOrigem: '',
-        valorUnitarioNota: 0,
-        criterioSelecao: '',
-        criterioVinculo: '',
-        tratamentoFiscal: null,
-        codigoProdutoNfe: '',
-        descricaoProdutoNfe: ''
-      };
+      // Use id parameter as fallback for idProd
+      if (!idProd && id) idProd = id;
 
-      if (produto) {
-        // 3. Tenta ListarPosEstoque para pegar CMC e saldo
-        try {
-          const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-          log('OMIE', `ListarPosEstoque para produto ${produto.codigo}`);
-          const est = await chamarOmie('estoque/consulta/', 'ListarPosEstoque', {
-            nPagina: 1,
-            nRegPorPagina: 100,
-            dDataPosicao: hoje,
-            cExibeTodos: 'S'
-          });
-
-          const produtos = est.produtos || [];
-          // Filtra pelo produto atual
-          const codProd = Number(id) || Number(produto.id) || 0;
-          const estoqueItem = produtos.find(e =>
-            e.nCodProd === codProd ||
-            String(e.cCodigo || '').toLowerCase() === String(produto.codigo || '').toLowerCase()
-          );
-
-          if (estoqueItem) {
-            compra.cmc = estoqueItem.nCMC || 0;
-            compra.saldo = estoqueItem.nSaldo || 0;
-            compra.dataEstoque = hoje;
-            log('DOMU', `Estoque encontrado: saldo=${compra.saldo} CMC=${compra.cmc}`);
-          }
-        } catch (e) {
-          log('DOMU', `ListarPosEstoque falhou: ${e.message}`);
+      // --- PASSOS 2-5: buscarUltimaCompra ---
+      let compra;
+      if (idProd) {
+        compra = await buscarUltimaCompra(idProd, produto ? produto.codigo : codigo);
+        // Set descricaoProdutoNfe from product if not set by nota
+        if (!compra.descricaoProdutoNfe && produto) {
+          compra.descricaoProdutoNfe = produto.descricao;
         }
-
-        // 4. Usa valor_unitario como custoUnitario
-        compra.fonteCusto = 'ultima_compra';
-        compra.custoUnitario = produto.valorUnitario;
-        compra.custoLiquidoUnitario = produto.valorUnitario;
-        compra.criterioSelecao = 'valor_unitario_cadastro';
-        compra.criterioVinculo = 'codigo_produto';
-        compra.codigoProdutoNfe = produto.codigo;
-        compra.descricaoProdutoNfe = produto.descricao;
-
-        log('DOMU', `Produto: ${produto.codigo} custoUnitario=${produto.valorUnitario}`);
+      } else {
+        // Sem idProd, retorna estrutura vazia
+        compra = {
+          fonteCusto: 'sem_ultima_compra',
+          custoUnitario: 0,
+          custoLiquidoUnitario: 0,
+          dataUltimaCompra: '',
+          numeroNota: '',
+          fornecedor: '',
+          idDocumentoOmie: '',
+          idRecebimentoOmie: '',
+          ipi: null,
+          icms: null,
+          pisCofins: null,
+          fiscalCompraCompleto: false,
+          tributosOrigem: '',
+          valorUnitarioNota: 0,
+          cmc: 0,
+          saldo: 0,
+          fisico: 0,
+          reservado: 0,
+          dataEstoque: '',
+          criterioSelecao: '',
+          criterioVinculo: '',
+          tratamentoFiscal: null,
+          codigoProdutoNfe: codigo || '',
+          descricaoProdutoNfe: ''
+        };
       }
 
-      log('DOMU', '200 OK');
+      log('DOMU', `200 OK — fonteCusto=${compra.fonteCusto} custoUnitario=${compra.custoUnitario}`);
       return jsonResponse(res, 200, { produto, compra });
     } catch (e) {
       return erroOmie(res, e);
     }
   }
+
 
   // ==================== STATIC FILES ====================
 
@@ -531,5 +778,5 @@ server.listen(PORTA, () => {
 
 // Export para testes
 if (typeof module !== 'undefined') {
-  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, PORTA };
+  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, buscarUltimaCompra, PORTA };
 }

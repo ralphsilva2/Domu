@@ -12,19 +12,17 @@ const assert = require('assert');
 // FIXTURES — Dados realistas da API Omie
 // ============================================================
 
-
 const FIXTURE_LISTAR_PRODUTOS_P1 = {
   produto_servico_cadastro: [
     {codigo_produto: "PSAI-050", codigo_produto_integracao: "101", descricao: "CHAPA PSAI CRISTAL 0,50 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3920.30.00", valor_unitario: 45.80},
     {codigo_produto: "PSAI-075", codigo_produto_integracao: "102", descricao: "CHAPA PSAI CRISTAL 0,75 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3920.30.00", valor_unitario: 62.50},
-    {codigo_produto: "ACR-200", codigo_produto_integracao: "201", descricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3926.90.90", valor_unitario: 146.36},
+    {codigo_produto: "ACR-200", codigo_produto_integracao: "201", descricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3926.90.90", valor_unitario: 200.00},
   ],
   total_de_paginas: 2,
   total_de_registros: 5,
   pagina: 1,
   registros_por_pagina: 200
 };
-
 
 const FIXTURE_LISTAR_PRODUTOS_P2 = {
   produto_servico_cadastro: [
@@ -37,6 +35,7 @@ const FIXTURE_LISTAR_PRODUTOS_P2 = {
   registros_por_pagina: 200
 };
 
+
 const FIXTURE_CONSULTAR_PRODUTO = {
   codigo_produto: "PSAI-050",
   codigo_produto_integracao: "101",
@@ -46,6 +45,14 @@ const FIXTURE_CONSULTAR_PRODUTO = {
   valor_unitario: 45.80
 };
 
+const FIXTURE_CONSULTAR_PRODUTO_ACR = {
+  codigo_produto: "ACR-200",
+  codigo_produto_integracao: "201",
+  descricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM",
+  unidade: "CH",
+  ncm: "3926.90.90",
+  valor_unitario: 200.00
+};
 
 const FIXTURE_ESTOQUE = {
   produtos: [
@@ -58,20 +65,108 @@ const FIXTURE_ERRO_OMIE = {
   faultcode: "SOAP-ENV:Client-102"
 };
 
+// --- NOVAS FIXTURES: Última compra ---
+
+const FIXTURE_MOVIMENTO_ESTOQUE = {
+  movimentos: [
+    {idMov: 5001, dtMov: "10/07/2026", dtEmissao: "08/07/2026", numDoc: "54321", operacao: "21", idDoc: 9001, idRecebimento: 8001, idProd: 201, tipo: "E", descricao: "Compra de Produto", cmc: 155, qtde: 10, valor: 1463.60, saldo: 25, cancelamento: "N"},
+    {idMov: 4500, dtMov: "15/03/2026", dtEmissao: "12/03/2026", numDoc: "51000", operacao: "21", idDoc: 8500, idRecebimento: 7500, idProd: 201, tipo: "E", descricao: "Compra de Produto", cmc: 148, qtde: 5, valor: 720, saldo: 15, cancelamento: "N"},
+    {idMov: 4600, dtMov: "20/05/2026", dtEmissao: "18/05/2026", numDoc: "52000", operacao: "30", idDoc: 8600, idRecebimento: 0, idProd: 201, tipo: "S", descricao: "Venda", cmc: 150, qtde: 3, valor: 450, saldo: 12, cancelamento: "N"}
+  ],
+  nPagina: 1,
+  nTotPaginas: 1,
+  nTotRegistros: 3,
+  nRegistros: 3
+};
+
+
+const FIXTURE_NOTA_ENTRADA = {
+  cabec: {
+    nIdNota: 9001,
+    cNumNFe: "54321",
+    cSerieNFe: "1",
+    dtEmissao: "08/07/2026",
+    cChaveNFe: "35260712345678901234550010000543211234567890",
+    nIdFornecedor: 5000,
+    cNomeFornecedor: "Distribuidora ABC Ltda"
+  },
+  produtos: [
+    {nCodProd: 201, cCodigo: "ACR-200", cDescricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", nQtde: 10, nValUnit: 146.36, cNCM: "3926.90.90", ICMS: {nAliqICMS: 12, nValorICMS: 175.63}, IPI: {nAliqIPI: 0, nValorIPI: 0}, PIS: {nAliqPIS: 1.65, nValorPIS: 24.15}, COFINS: {nAliqCOFINS: 7.60, nValorCOFINS: 111.23}, custos: {cICMSCusto: "S", cIPICusto: "N", cPISCusto: "N", cCOFINSCusto: "N", cFreteCusto: "N"}},
+    {nCodProd: 301, cCodigo: "MDF-060", cDescricao: "CHAPA MDF CRU 6,00 MM", nQtde: 20, nValUnit: 89.90, cNCM: "4411.12.10", ICMS: {nAliqICMS: 12}, IPI: {nAliqIPI: 3.25}, PIS: {nAliqPIS: 1.65}, COFINS: {nAliqCOFINS: 7.60}, custos: {}}
+  ]
+};
+
+const FIXTURE_POSICAO_ESTOQUE = {
+  saldo: 25,
+  cmc: 155.00,
+  fisico: 25,
+  reservado: 0,
+  pendente: 0,
+  estoque_minimo: 5,
+  codigo_local_estoque: 1
+};
+
+const FIXTURE_RECEBIMENTO = {
+  nIdReceb: 8001,
+  nIdFornecedor: 5000,
+  cNome: "Distribuidora ABC",
+  cRazaoSocial: "Distribuidora ABC Ltda",
+  cChaveNfe: "35260712345678901234550010000543211234567890",
+  cNumeroNFe: "54321",
+  cSerieNFe: "1",
+  dEmissaoNFe: "08/07/2026",
+  nValorNFe: 3263.60
+};
+
+const FIXTURE_MOVIMENTO_VAZIO = {
+  movimentos: [],
+  nPagina: 1,
+  nTotPaginas: 1,
+  nTotRegistros: 0,
+  nRegistros: 0
+};
+
+const FIXTURE_MOVIMENTO_COM_CANCELADO = {
+  movimentos: [
+    {idMov: 5001, dtMov: "10/07/2026", dtEmissao: "08/07/2026", numDoc: "54321", operacao: "21", idDoc: 9001, idRecebimento: 8001, idProd: 201, tipo: "E", descricao: "Compra de Produto", cmc: 155, qtde: 10, valor: 1463.60, saldo: 25, cancelamento: "S"},
+    {idMov: 4500, dtMov: "15/03/2026", dtEmissao: "12/03/2026", numDoc: "51000", operacao: "21", idDoc: 8500, idRecebimento: 7500, idProd: 201, tipo: "E", descricao: "Compra de Produto", cmc: 148, qtde: 5, valor: 720, saldo: 15, cancelamento: "N"},
+    {idMov: 4600, dtMov: "20/05/2026", dtEmissao: "18/05/2026", numDoc: "52000", operacao: "30", idDoc: 8600, idRecebimento: 0, idProd: 201, tipo: "S", descricao: "Venda", cmc: 150, qtde: 3, valor: 450, saldo: 12, cancelamento: "N"}
+  ],
+  nPagina: 1,
+  nTotPaginas: 1,
+  nTotRegistros: 3,
+  nRegistros: 3
+};
+
+
+const FIXTURE_NOTA_ENTRADA_8500 = {
+  cabec: {
+    nIdNota: 8500,
+    cNumNFe: "51000",
+    cSerieNFe: "1",
+    dtEmissao: "12/03/2026",
+    cChaveNFe: "35260312345678901234550010000510001234567890",
+    nIdFornecedor: 4000,
+    cNomeFornecedor: "Outra Distribuidora Ltda"
+  },
+  produtos: [
+    {nCodProd: 201, cCodigo: "ACR-200", cDescricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", nQtde: 5, nValUnit: 144.00, cNCM: "3926.90.90", ICMS: {nAliqICMS: 12, nValorICMS: 86.40}, IPI: {nAliqIPI: 0, nValorIPI: 0}, PIS: {nAliqPIS: 1.65, nValorPIS: 11.88}, COFINS: {nAliqCOFINS: 7.60, nValorCOFINS: 54.72}, custos: {cICMSCusto: "S", cIPICusto: "N", cPISCusto: "N", cCOFINSCusto: "N"}}
+  ]
+};
+
 // ============================================================
 // MOCK DO HTTPS — Intercepta chamadas para app.omie.com.br
 // ============================================================
 
 let mockResponses = [];
+let mockCallRouter = null;
 let mockCalls = [];
 
 const originalRequest = https.request;
 
-
 function instalarMock() {
   mockCalls = [];
   https.request = function(opts, callback) {
-    // Captura a chamada
     const callInfo = {
       hostname: opts.hostname,
       path: opts.path,
@@ -84,18 +179,19 @@ function instalarMock() {
       _destroyed: false,
       write(data) { callInfo.body += data; },
       end() {
-        // Parse o body para saber qual call foi feita
         let parsed = {};
         try { parsed = JSON.parse(callInfo.body); } catch(e) {}
         callInfo.parsed = parsed;
         mockCalls.push(callInfo);
 
-        // Encontra a resposta mock adequada
         let responseData = '{}';
         let statusCode = 200;
 
-
-        if (mockResponses.length > 0) {
+        // Use router if available, otherwise use queue
+        if (mockCallRouter) {
+          const routedResponse = mockCallRouter(parsed);
+          responseData = JSON.stringify(routedResponse);
+        } else if (mockResponses.length > 0) {
           const mock = mockResponses.shift();
           if (typeof mock === 'function') {
             responseData = JSON.stringify(mock(parsed));
@@ -104,7 +200,6 @@ function instalarMock() {
           }
         }
 
-        // Simula a resposta HTTP
         const fakeRes = {
           statusCode,
           headers: { 'content-type': 'application/json' },
@@ -129,16 +224,23 @@ function instalarMock() {
   };
 }
 
-
 function restaurarMock() {
   https.request = originalRequest;
   mockResponses = [];
+  mockCallRouter = null;
   mockCalls = [];
 }
 
 function setMockResponses(...responses) {
   mockResponses = [...responses];
+  mockCallRouter = null;
 }
+
+function setMockRouter(routerFn) {
+  mockCallRouter = routerFn;
+  mockResponses = [];
+}
+
 
 // ============================================================
 // UTILITÁRIO — Fazer request HTTP local
@@ -169,7 +271,6 @@ function requisicaoLocal(method, path, body = null) {
   });
 }
 
-
 // ============================================================
 // FRAMEWORK DE TESTES SIMPLES
 // ============================================================
@@ -185,11 +286,11 @@ async function teste(nome, fn) {
     await fn();
     testesOk++;
     resultados.push({ nome, ok: true });
-    console.log(`  ✓ ${nome}`);
+    console.log(`  \u2713 ${nome}`);
   } catch (e) {
     testesFalha++;
     resultados.push({ nome, ok: false, erro: e.message });
-    console.log(`  ✗ ${nome}`);
+    console.log(`  \u2717 ${nome}`);
     console.log(`    ERRO: ${e.message}`);
   }
 }
@@ -200,18 +301,12 @@ async function teste(nome, fn) {
 
 let serverInstance = null;
 
-
 async function iniciarServidor() {
-  // Instala mock ANTES de carregar o modulo
   instalarMock();
-
-  // Limpa cache do require
   delete require.cache[require.resolve('./conector-omie.js')];
-
   const conector = require('./conector-omie.js');
   serverInstance = conector.server;
 
-  // Espera o servidor estar ouvindo
   await new Promise((resolve, reject) => {
     if (serverInstance.listening) return resolve();
     serverInstance.on('listening', resolve);
@@ -227,7 +322,6 @@ async function pararServidor() {
   restaurarMock();
 }
 
-// Pequena pausa entre testes para garantir I/O
 function pausa(ms = 50) {
   return new Promise(r => setTimeout(r, ms));
 }
@@ -258,12 +352,10 @@ async function executarTestes() {
 
   await pausa();
 
-
   // ----------------------------------------------------------
   // 2. POST /api/omie/test — conexao com sucesso
   // ----------------------------------------------------------
   await teste('POST /api/omie/test — conecta com sucesso', async () => {
-    // Mock: ListarProdutos retorna 1 produto para teste
     setMockResponses({
       produto_servico_cadastro: [FIXTURE_CONSULTAR_PRODUTO],
       total_de_paginas: 1,
@@ -287,7 +379,6 @@ async function executarTestes() {
 
   await pausa();
 
-
   // ----------------------------------------------------------
   // 3. GET /api/omie/status — agora conectado
   // ----------------------------------------------------------
@@ -301,33 +392,29 @@ async function executarTestes() {
 
   await pausa();
 
+
   // ----------------------------------------------------------
   // 4. GET /api/omie/produtos — paginacao completa (2 paginas)
   // ----------------------------------------------------------
   await teste('GET /api/omie/produtos — paginacao com 2 paginas', async () => {
-    // Mock: 2 paginas de produtos
     setMockResponses(FIXTURE_LISTAR_PRODUTOS_P1, FIXTURE_LISTAR_PRODUTOS_P2);
 
     const r = await requisicaoLocal('GET', '/api/omie/produtos?q=CHAPA');
     assert.strictEqual(r.status, 200);
     assert(Array.isArray(r.body.produtos));
-    // Deve retornar 4 produtos com "CHAPA" (todos menos o TUBO)
     assert.strictEqual(r.body.produtos.length, 4);
   });
 
   await pausa();
 
-
   // ----------------------------------------------------------
   // 5. GET /api/omie/produtos — busca por descricao PSAI
   // ----------------------------------------------------------
   await teste('GET /api/omie/produtos — busca PSAI retorna resultados corretos', async () => {
-    // Cache ja esta carregado do teste anterior, nao precisa mock
     const r = await requisicaoLocal('GET', '/api/omie/produtos?q=PSAI');
     assert.strictEqual(r.status, 200);
     assert(Array.isArray(r.body.produtos));
     assert.strictEqual(r.body.produtos.length, 2);
-    // Verifica que sao os produtos PSAI
     assert(r.body.produtos.every(p => p.codigo.includes('PSAI') || p.descricao.toLowerCase().includes('psai')));
   });
 
@@ -342,11 +429,10 @@ async function executarTestes() {
     assert(Array.isArray(r.body.produtos));
     assert.strictEqual(r.body.produtos.length, 1);
     assert.strictEqual(r.body.produtos[0].codigo, 'ACR-200');
-    assert.strictEqual(r.body.produtos[0].valorUnitario, 146.36);
+    assert.strictEqual(r.body.produtos[0].valorUnitario, 200.00);
   });
 
   await pausa();
-
 
   // ----------------------------------------------------------
   // 7. GET /api/omie/produtos — formato correto de resposta
@@ -356,14 +442,12 @@ async function executarTestes() {
     assert.strictEqual(r.status, 200);
     assert(r.body.produtos.length >= 1);
     const p = r.body.produtos[0];
-    // Valida todas as propriedades do contrato
     assert.strictEqual(typeof p.id, 'string');
     assert.strictEqual(typeof p.codigo, 'string');
     assert.strictEqual(typeof p.descricao, 'string');
     assert.strictEqual(typeof p.unidade, 'string');
     assert.strictEqual(typeof p.ncm, 'string');
     assert.strictEqual(typeof p.valorUnitario, 'number');
-    // Nao deve ter propriedades extras do Omie
     assert.strictEqual(p.codigo_produto, undefined);
     assert.strictEqual(p.codigo_produto_integracao, undefined);
     assert.strictEqual(p.valor_unitario, undefined);
@@ -376,12 +460,10 @@ async function executarTestes() {
   // 8. GET /api/omie/materiais — retorna lista de materiais
   // ----------------------------------------------------------
   await teste('GET /api/omie/materiais — retorna produtos', async () => {
-    // Cache ja populado
     const r = await requisicaoLocal('GET', '/api/omie/materiais?categoria=chapa-psai');
     assert.strictEqual(r.status, 200);
     assert(Array.isArray(r.body.produtos));
     assert(r.body.produtos.length >= 1);
-    // Filtra por "psai" (derivado da categoria)
     assert(r.body.produtos.every(p =>
       p.codigo.toLowerCase().includes('psai') ||
       p.descricao.toLowerCase().includes('psai')
@@ -391,50 +473,84 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
-  // 9. GET /api/omie/produto-compra — ConsultarProduto + estoque
+  // 9. GET /api/omie/produto-compra — fluxo completo ultima compra (acrilico)
   // ----------------------------------------------------------
-  await teste('GET /api/omie/produto-compra — retorna produto e dados de compra', async () => {
-    // Mock: ConsultarProduto + ListarPosEstoque
-    setMockResponses(FIXTURE_CONSULTAR_PRODUTO, FIXTURE_ESTOQUE);
+  await teste('GET /api/omie/produto-compra — fluxo completo ultima compra nota entrada', async () => {
+    // Router: routes different calls to different fixtures
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
 
-    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=PSAI-050&id=101');
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
     assert(r.body.produto !== null);
-    assert.strictEqual(r.body.produto.codigo, 'PSAI-050');
-    assert.strictEqual(r.body.produto.id, '101');
-    assert.strictEqual(r.body.produto.valorUnitario, 45.80);
-    // Dados de compra
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
-    assert.strictEqual(r.body.compra.custoUnitario, 45.80);
-    assert.strictEqual(r.body.compra.cmc, 42.30);
+    assert.strictEqual(r.body.produto.codigo, 'ACR-200');
+    assert.strictEqual(r.body.produto.id, '201');
+    // valor_unitario do cadastro e 200, mas custoUnitario DEVE ser 146.36 da nota
+    assert.strictEqual(r.body.produto.valorUnitario, 200.00);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.custoUnitario, 146.36);
+    assert.strictEqual(r.body.compra.custoLiquidoUnitario, 146.36);
+    assert.strictEqual(r.body.compra.valorUnitarioNota, 146.36);
+    assert.strictEqual(r.body.compra.numeroNota, '54321');
+    assert.strictEqual(r.body.compra.dataUltimaCompra, '08/07/2026');
+    assert.strictEqual(r.body.compra.fornecedor, 'Distribuidora ABC Ltda');
+    assert.strictEqual(r.body.compra.cmc, 155.00);
     assert.strictEqual(r.body.compra.saldo, 25);
-    assert.strictEqual(typeof r.body.compra.dataEstoque, 'string');
+    assert.strictEqual(r.body.compra.fisico, 25);
+    assert.strictEqual(r.body.compra.reservado, 0);
+    assert.strictEqual(r.body.compra.fiscalCompraCompleto, true);
+    assert.strictEqual(r.body.compra.tributosOrigem, 'nota_entrada');
+    assert.strictEqual(r.body.compra.criterioSelecao, 'maior_data_emissao');
+    assert.strictEqual(r.body.compra.criterioVinculo, 'nota_entrada_item');
+    assert.strictEqual(r.body.compra.codigoProdutoNfe, 'ACR-200');
+    assert.strictEqual(r.body.compra.icms, 12);
+    assert.strictEqual(r.body.compra.ipi, 0);
+    assert.strictEqual(r.body.compra.pisCofins, 9.25); // 1.65 + 7.60
+    assert(r.body.compra.tratamentoFiscal !== null);
+    assert.strictEqual(r.body.compra.tratamentoFiscal.cICMSCusto, 'S');
+    assert.strictEqual(r.body.compra.tratamentoFiscal.cIPICusto, 'N');
   });
 
   await pausa();
 
 
   // ----------------------------------------------------------
-  // 10. GET /api/omie/produto-compra — formato completo da resposta
+  // 10. Formato completo do contrato de resposta
   // ----------------------------------------------------------
   await teste('GET /api/omie/produto-compra — formato completo do contrato', async () => {
-    setMockResponses(FIXTURE_CONSULTAR_PRODUTO, FIXTURE_ESTOQUE);
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
 
-    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=PSAI-050&id=101');
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
     const c = r.body.compra;
-    // Verifica todos os campos do contrato
     assert.strictEqual(typeof c.fonteCusto, 'string');
     assert.strictEqual(typeof c.custoUnitario, 'number');
     assert.strictEqual(typeof c.custoLiquidoUnitario, 'number');
     assert.strictEqual(typeof c.dataUltimaCompra, 'string');
     assert.strictEqual(typeof c.numeroNota, 'string');
+    assert.strictEqual(typeof c.fornecedor, 'string');
+    assert.strictEqual(typeof c.idDocumentoOmie, 'string');
+    assert.strictEqual(typeof c.idRecebimentoOmie, 'string');
     assert.strictEqual(typeof c.cmc, 'number');
     assert.strictEqual(typeof c.saldo, 'number');
+    assert.strictEqual(typeof c.fisico, 'number');
+    assert.strictEqual(typeof c.reservado, 'number');
     assert.strictEqual(typeof c.dataEstoque, 'string');
-    assert.strictEqual(typeof c.ipi, 'number');
-    assert.strictEqual(typeof c.icms, 'number');
-    assert.strictEqual(typeof c.pisCofins, 'number');
     assert.strictEqual(typeof c.fiscalCompraCompleto, 'boolean');
     assert.strictEqual(typeof c.tributosOrigem, 'string');
     assert.strictEqual(typeof c.valorUnitarioNota, 'number');
@@ -442,25 +558,26 @@ async function executarTestes() {
     assert.strictEqual(typeof c.criterioVinculo, 'string');
     assert.strictEqual(typeof c.codigoProdutoNfe, 'string');
     assert.strictEqual(typeof c.descricaoProdutoNfe, 'string');
-    // tratamentoFiscal pode ser object ou null
     assert(c.tratamentoFiscal === null || typeof c.tratamentoFiscal === 'object');
+    // ipi, icms, pisCofins can be number or null
+    assert(c.ipi === null || typeof c.ipi === 'number');
+    assert(c.icms === null || typeof c.icms === 'number');
+    assert(c.pisCofins === null || typeof c.pisCofins === 'number');
   });
 
   await pausa();
 
 
   // ----------------------------------------------------------
-  // 11. Erro Omie (faultstring) — retorna HTTP 502
+  // 11. Erro Omie (faultstring) — retorna HTTP 400 no /test
   // ----------------------------------------------------------
-  await teste('Erro Omie faultstring — retorna HTTP 502 com mensagem', async () => {
-    // Precisa reconectar com credenciais invalidas para testar erro
+  await teste('Erro Omie faultstring — retorna HTTP 400 com mensagem', async () => {
     setMockResponses(FIXTURE_ERRO_OMIE);
 
     const r = await requisicaoLocal('POST', '/api/omie/test', {
       appKey: 'INVALIDA',
       appSecret: 'INVALIDA'
     });
-    // POST /test retorna 400 (nao 502) porque e tratado no handler
     assert.strictEqual(r.status, 400);
     assert(r.body.error.includes('chave de acesso'));
   });
@@ -481,26 +598,16 @@ async function executarTestes() {
   });
   await pausa();
 
-
   // ----------------------------------------------------------
-  // 12. Erro Omie em /produtos — retorna 502 (nao array vazio)
+  // 12. Erro Omie em /produtos — retorna 502, NAO array vazio
   // ----------------------------------------------------------
   await teste('Erro Omie em /produtos — retorna 502, NAO array vazio', async () => {
-    // Forca refresh do cache com erro
-    // Limpa o cache forçando require
     setMockResponses(FIXTURE_ERRO_OMIE);
 
-    // Faz um request que vai tentar recarregar cache
-    // Para forcar recarga, precisamos invalidar o cache
-    // Usamos /materiais sem categoria pois tambem usa o cache
     const r = await requisicaoLocal('GET', '/api/omie/produtos?q=XYZINEXISTENTE');
-    // Se o cache ja tem dados, vai retornar array vazio filtrado (OK, pois nao houve erro)
-    // Se o cache esta vazio e da erro, deve retornar HTTP != 200
     if (r.status === 200) {
-      // Cache pode estar populado do teste anterior — OK
       assert(Array.isArray(r.body.produtos));
     } else {
-      // Se houve erro, NAO deve ser 200 com array vazio
       assert(r.status >= 400);
       assert(r.body.error !== undefined);
       assert(!Array.isArray(r.body.produtos));
@@ -508,7 +615,6 @@ async function executarTestes() {
   });
 
   await pausa();
-
 
   // ----------------------------------------------------------
   // 13. POST /api/omie/test — credenciais vazias retorna 400
@@ -524,11 +630,11 @@ async function executarTestes() {
 
   await pausa();
 
+
   // ----------------------------------------------------------
   // 14. GET /api/omie/produtos — termo curto retorna 400
   // ----------------------------------------------------------
   await teste('GET /api/omie/produtos — termo < 2 chars retorna 400', async () => {
-    // Reconecta
     setMockResponses({
       produto_servico_cadastro: [FIXTURE_CONSULTAR_PRODUTO],
       total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
@@ -545,16 +651,14 @@ async function executarTestes() {
 
   await pausa();
 
-
   // ----------------------------------------------------------
-  // 15. Validar que Content-Type para Omie e exatamente 'application/json'
+  // 15. Content-Type para Omie e exatamente application/json
   // ----------------------------------------------------------
   await teste('Content-Type para Omie e exatamente application/json (sem charset)', async () => {
     setMockResponses(FIXTURE_LISTAR_PRODUTOS_P1);
     await requisicaoLocal('GET', '/api/omie/produtos?q=PSAI');
     await pausa();
 
-    // Verifica as chamadas capturadas
     const ultima = mockCalls[mockCalls.length - 1];
     if (ultima) {
       assert.strictEqual(ultima.headers['Content-Type'], 'application/json');
@@ -566,10 +670,9 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
-  // 16. Validar que app_secret NUNCA aparece nos logs
+  // 16. app_secret nunca aparece nos logs
   // ----------------------------------------------------------
   await teste('app_secret nunca e logado (verificacao de seguranca)', async () => {
-    // Captura console.log temporariamente
     const logs = [];
     const originalLog = console.log;
     console.log = (...args) => logs.push(args.join(' '));
@@ -593,7 +696,6 @@ async function executarTestes() {
 
   await pausa();
 
-
   // ----------------------------------------------------------
   // 17. GET /api/omie/produto-compra — sem parametros retorna 400
   // ----------------------------------------------------------
@@ -605,11 +707,11 @@ async function executarTestes() {
 
   await pausa();
 
+
   // ----------------------------------------------------------
   // 18. Limite maximo de 50 resultados
   // ----------------------------------------------------------
   await teste('GET /api/omie/produtos — limita a 50 resultados', async () => {
-    // Gera 60 produtos com "TESTE" no nome
     const muitosProdutos = [];
     for (let i = 0; i < 60; i++) {
       muitosProdutos.push({
@@ -628,7 +730,6 @@ async function executarTestes() {
       registros_por_pagina: 200
     });
 
-    // Forca refresh do cache
     const r = await requisicaoLocal('GET', '/api/omie/produtos?q=TESTE');
     assert.strictEqual(r.status, 200);
     assert(r.body.produtos.length <= 50,
@@ -637,6 +738,185 @@ async function executarTestes() {
 
   await pausa();
 
+
+  // ===========================================================
+  // NOVOS TESTES — Fluxo "Última Compra" com NF-e de Entrada
+  // ===========================================================
+
+  // Reconecta para os novos testes
+  setMockResponses({
+    produto_servico_cadastro: [FIXTURE_CONSULTAR_PRODUTO],
+    total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+  });
+  await requisicaoLocal('POST', '/api/omie/test', {
+    appKey: '1234567890', appSecret: 'segredo-secreto-123'
+  });
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 19. Acrilico — custoUnitario vem da nota, NAO do cadastro
+  // ----------------------------------------------------------
+  await teste('Ultima compra: custoUnitario=146.36 (nota), NAO 200 (cadastro)', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    // cadastro tem valor_unitario=200, mas custo REAL e 146.36
+    assert.strictEqual(r.body.produto.valorUnitario, 200.00);
+    assert.strictEqual(r.body.compra.custoUnitario, 146.36);
+    assert.notStrictEqual(r.body.compra.custoUnitario, 200.00);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+  });
+
+  await pausa();
+
+
+  // ----------------------------------------------------------
+  // 20. Filtragem de movimentos — so operacao 21/22, exclui cancelados
+  // ----------------------------------------------------------
+  await teste('Filtragem movimentos: so operacao 21/22, exclui cancelados', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_COM_CANCELADO;
+      // A compra mais recente (idMov=5001) esta cancelada, deve pegar a segunda (idMov=4500, idDoc=8500)
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA_8500;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    // Deve ter pego a nota 8500 (segunda compra), nao a cancelada
+    assert.strictEqual(r.body.compra.custoUnitario, 144.00);
+    assert.strictEqual(r.body.compra.numeroNota, '51000');
+    assert.strictEqual(r.body.compra.dataUltimaCompra, '12/03/2026');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 21. Selecao mais recente — pega maior dtEmissao entre compras validas
+  // ----------------------------------------------------------
+  await teste('Selecao mais recente: pega maior dtEmissao entre compras validas', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    // Movimento com dtEmissao 08/07/2026 e o mais recente (vs 12/03/2026)
+    assert.strictEqual(r.body.compra.dataUltimaCompra, '08/07/2026');
+    assert.strictEqual(r.body.compra.custoUnitario, 146.36);
+    assert.strictEqual(r.body.compra.criterioSelecao, 'maior_data_emissao');
+  });
+
+  await pausa();
+
+
+  // ----------------------------------------------------------
+  // 22. Sem historico de compra — fonteCusto = sem_ultima_compra
+  // ----------------------------------------------------------
+  await teste('Sem historico compra: fonteCusto=sem_ultima_compra, custoUnitario=0', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_VAZIO;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'sem_ultima_compra');
+    assert.strictEqual(r.body.compra.custoUnitario, 0);
+    assert.strictEqual(r.body.compra.custoLiquidoUnitario, 0);
+    assert.strictEqual(r.body.compra.dataUltimaCompra, '');
+    assert.strictEqual(r.body.compra.numeroNota, '');
+    assert.strictEqual(r.body.compra.fiscalCompraCompleto, false);
+    // Mas estoque deve estar disponivel
+    assert.strictEqual(r.body.compra.cmc, 155.00);
+    assert.strictEqual(r.body.compra.saldo, 25);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 23. Nota inacessivel — fallback para movimento (valor/qtde)
+  // ----------------------------------------------------------
+  await teste('Nota inacessivel: fallback para ultima_compra_movimento', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') {
+        // Simula erro na consulta da nota
+        return { faultstring: "Nota não encontrada", faultcode: "SOAP-ENV:Client-404" };
+      }
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_movimento');
+    // valor=1463.60, qtde=10 → unit=146.36
+    assert.strictEqual(r.body.compra.custoUnitario, 146.36);
+    assert.strictEqual(r.body.compra.criterioVinculo, 'movimento_estoque');
+    assert.strictEqual(r.body.compra.fiscalCompraCompleto, false);
+    assert.strictEqual(r.body.compra.tributosOrigem, 'nao_disponivel');
+    // Tributos devem ser null pois nao tem nota
+    assert.strictEqual(r.body.compra.icms, null);
+    assert.strictEqual(r.body.compra.ipi, null);
+    assert.strictEqual(r.body.compra.pisCofins, null);
+    assert.strictEqual(r.body.compra.tratamentoFiscal, null);
+  });
+
+  await pausa();
+
+
+  // ----------------------------------------------------------
+  // 24. CMC e custoUnitario vem de fontes diferentes
+  // ----------------------------------------------------------
+  await teste('CMC vs custoUnitario: fontes diferentes (PosicaoEstoque vs nota)', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    // CMC vem de PosicaoEstoque (155.00)
+    assert.strictEqual(r.body.compra.cmc, 155.00);
+    // custoUnitario vem da nota de entrada (146.36)
+    assert.strictEqual(r.body.compra.custoUnitario, 146.36);
+    // Sao diferentes — CMC e media, custoUnitario e ultima compra real
+    assert.notStrictEqual(r.body.compra.cmc, r.body.compra.custoUnitario);
+  });
+
+  await pausa();
 
   // ----------------------------------------------------------
   // RESULTADO FINAL
@@ -648,7 +928,7 @@ async function executarTestes() {
   if (testesFalha > 0) {
     console.log(`  FALHAS: ${testesFalha}`);
     resultados.filter(r => !r.ok).forEach(r => {
-      console.log(`    ✗ ${r.nome}: ${r.erro}`);
+      console.log(`    \u2717 ${r.nome}: ${r.erro}`);
     });
   }
   console.log('  =============================================\n');
