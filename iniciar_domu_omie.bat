@@ -10,6 +10,18 @@ echo  http://localhost:3000
 echo.
 echo  NAO feche esta janela!
 echo.
+
+where node >nul 2>nul
+if %errorlevel% neq 0 (
+  echo.
+  echo  ERRO: Node.js nao encontrado!
+  echo  Baixe em: https://nodejs.org
+  echo.
+  pause
+  exit /b 1
+)
+
+start http://localhost:3000
 node conector-omie.js
 if %errorlevel% neq 0 (
   echo.

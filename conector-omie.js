@@ -1,5 +1,5 @@
 // ============================================================
-// DOMU — Conector Omie
+// DOMU — Conector Omie (v2)
 // Serve o HTML + faz proxy das chamadas para a API Omie
 // O usuario acessa: http://localhost:3000
 // ============================================================
@@ -11,9 +11,30 @@ const path = require('path');
 const urlMod = require('url');
 
 const PORTA = 3000;
+const OMIE_BASE = '/api/v1/';
+const OMIE_HOST = 'app.omie.com.br';
+const TIMEOUT_MS = 25000;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+const MAX_RESULTADOS_BUSCA = 50;
+const REGISTROS_POR_PAGINA = 200;
+
+// Estado da conexao
 let appKey = '';
 let appSecret = '';
 let conectado = false;
+
+// Cache de produtos
+let cacheProdutos = [];
+let cacheTimestamp = 0;
+let cacheCarregando = false;
+
+// ============================================================
+// LOGGING
+// ============================================================
+function log(tag, msg) {
+  const ts = new Date().toISOString().slice(11, 19);
+  console.log(`[${tag}] ${msg}`);
+}
 
 // ============================================================
 // CHAMADA À API OMIE
@@ -26,17 +47,18 @@ function chamarOmie(endpoint, call, param) {
       app_secret: appSecret,
       param: Array.isArray(param) ? param : [param]
     });
+
     const opts = {
-      hostname: 'app.omie.com.br',
+      hostname: OMIE_HOST,
       port: 443,
-      path: '/api/v1/' + endpoint,
+      path: OMIE_BASE + endpoint,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload)
       }
     };
-    console.log('  [OMIE] ' + call + ' => ' + opts.path);
+
     const req = https.request(opts, res => {
       let data = '';
       res.on('data', c => data += c);
@@ -44,8 +66,10 @@ function chamarOmie(endpoint, call, param) {
         try {
           const json = JSON.parse(data);
           if (json.faultstring) {
-            console.log('  [OMIE] FAULT: ' + json.faultstring);
-            return reject(new Error(json.faultstring));
+            log('OMIE', `FAULT: ${json.faultstring} (${json.faultcode || ''})`);
+            const err = new Error(json.faultstring);
+            err.isOmieFault = true;
+            return reject(err);
           }
           resolve(json);
         } catch (e) {
@@ -53,8 +77,16 @@ function chamarOmie(endpoint, call, param) {
         }
       });
     });
-    req.on('error', reject);
-    req.setTimeout(25000, () => { req.destroy(); reject(new Error('Timeout Omie (25s)')); });
+
+    req.on('error', err => {
+      reject(new Error('Erro de conexao com Omie: ' + err.message));
+    });
+
+    req.setTimeout(TIMEOUT_MS, () => {
+      req.destroy();
+      reject(new Error('Timeout Omie (25s)'));
+    });
+
     req.write(payload);
     req.end();
   });
@@ -64,10 +96,11 @@ function chamarOmie(endpoint, call, param) {
 // LER BODY DO REQUEST
 // ============================================================
 function lerBody(req) {
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     let b = '';
     req.on('data', c => b += c);
     req.on('end', () => resolve(b));
+    req.on('error', reject);
   });
 }
 
@@ -86,6 +119,71 @@ function mapProduto(p) {
 }
 
 // ============================================================
+// PAGINAÇÃO COMPLETA — Carrega TODOS os produtos do Omie
+// ============================================================
+async function carregarTodosProdutos() {
+  const todos = [];
+  let pagina = 1;
+  let totalPaginas = 1;
+
+  do {
+    log('OMIE', `ListarProdutos pagina=${pagina} registros=${REGISTROS_POR_PAGINA}`);
+    const r = await chamarOmie('geral/produtos/', 'ListarProdutos', {
+      pagina,
+      registros_por_pagina: REGISTROS_POR_PAGINA,
+      apenas_importado_api: 'N'
+    });
+
+    const lista = r.produto_servico_cadastro || [];
+    todos.push(...lista);
+    totalPaginas = r.total_de_paginas || 1;
+
+    if (pagina === 1) {
+      log('OMIE', `OK ${r.total_de_registros || lista.length} produtos, ${totalPaginas} paginas`);
+    } else {
+      log('OMIE', `OK ${lista.length} produtos`);
+    }
+
+    pagina++;
+  } while (pagina <= totalPaginas);
+
+  return todos;
+}
+
+// ============================================================
+// CACHE DE PRODUTOS
+// ============================================================
+async function obterProdutosCache(forceRefresh = false) {
+  const agora = Date.now();
+  const cacheValido = !forceRefresh && cacheProdutos.length > 0 && (agora - cacheTimestamp) < CACHE_TTL_MS;
+
+  if (cacheValido) {
+    log('CACHE', `Usando cache (${cacheProdutos.length} produtos, idade: ${Math.round((agora - cacheTimestamp) / 1000)}s)`);
+    return cacheProdutos;
+  }
+
+  if (cacheCarregando) {
+    // Espera o carregamento em andamento
+    log('CACHE', 'Aguardando carregamento em andamento...');
+    while (cacheCarregando) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+    return cacheProdutos;
+  }
+
+  cacheCarregando = true;
+  try {
+    log('CACHE', 'Atualizando cache de produtos...');
+    cacheProdutos = await carregarTodosProdutos();
+    cacheTimestamp = Date.now();
+    log('CACHE', `Cache atualizado: ${cacheProdutos.length} produtos`);
+    return cacheProdutos;
+  } finally {
+    cacheCarregando = false;
+  }
+}
+
+// ============================================================
 // SERVIR ARQUIVO ESTÁTICO
 // ============================================================
 function servirArquivo(res, filePath) {
@@ -97,17 +195,39 @@ function servirArquivo(res, filePath) {
     '.json': 'application/json; charset=utf-8',
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
-    '.ico': 'image/x-icon'
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf'
   };
   const contentType = mimeTypes[ext] || 'application/octet-stream';
+
   try {
     const conteudo = fs.readFileSync(filePath);
     res.writeHead(200, { 'Content-Type': contentType });
     res.end(conteudo);
   } catch (e) {
-    res.writeHead(404);
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Arquivo nao encontrado');
   }
+}
+
+// ============================================================
+// UTILITÁRIOS DE RESPOSTA
+// ============================================================
+function jsonResponse(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(obj));
+}
+
+function erroOmie(res, err) {
+  if (err.isOmieFault) {
+    return jsonResponse(res, 502, { error: `Omie: ${err.message}` });
+  }
+  return jsonResponse(res, 500, { error: err.message });
 }
 
 // ============================================================
@@ -123,171 +243,251 @@ async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-  const json = (code, obj) => {
-    res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(obj));
-  };
-
   // ==================== API ROUTES ====================
 
-  if (caminho === '/api/omie/status') {
-    return json(200, {
+  // GET /api/omie/status
+  if (caminho === '/api/omie/status' && req.method === 'GET') {
+    log('DOMU', 'GET /api/omie/status');
+    const resultado = {
       connected: conectado,
       configured: Boolean(appKey && appSecret),
       appKeyMasked: appKey ? appKey.slice(0, 4) + '****' + appKey.slice(-2) : ''
-    });
+    };
+    log('DOMU', '200 OK');
+    return jsonResponse(res, 200, resultado);
   }
 
+  // POST /api/omie/test
   if (caminho === '/api/omie/test' && req.method === 'POST') {
+    log('DOMU', 'POST /api/omie/test');
     try {
       const body = JSON.parse(await lerBody(req) || '{}');
-      if (body.appKey) appKey = String(body.appKey).trim();
-      if (body.appSecret) appSecret = String(body.appSecret).trim();
-      if (!appKey || !appSecret) return json(400, { error: 'Informe App Key e App Secret.' });
+      if (body.appKey !== undefined) appKey = String(body.appKey).trim();
+      if (body.appSecret !== undefined) appSecret = String(body.appSecret).trim();
 
-      console.log('\n[TEST] Testando credenciais...');
+      if (!appKey || !appSecret) {
+        log('DOMU', '400 Credenciais ausentes');
+        return jsonResponse(res, 400, { error: 'Informe App Key e App Secret.' });
+      }
+
+      log('OMIE', 'ListarProdutos pagina=1 registros=1 (teste)');
       const r = await chamarOmie('geral/produtos/', 'ListarProdutos', {
         pagina: 1,
         registros_por_pagina: 1,
         apenas_importado_api: 'N'
       });
+
       conectado = true;
+      // Limpa cache ao reconectar com novas credenciais
+      cacheProdutos = [];
+      cacheTimestamp = 0;
+
       const p = (r.produto_servico_cadastro || [])[0] || {};
-      console.log('[TEST] OK! Produto: ' + (p.codigo_produto || '(vazio)'));
-      return json(200, {
+      const resultado = {
         connected: true,
         produtoTesteCodigo: p.codigo_produto || '',
         produtoTesteId: String(p.codigo_produto_integracao || p.codigo_produto || ''),
         custoTeste: p.valor_unitario || 0,
         appKeyMasked: appKey.slice(0, 4) + '****' + appKey.slice(-2)
-      });
+      };
+
+      log('DOMU', `200 OK — Produto teste: ${p.codigo_produto || '(vazio)'}`);
+      return jsonResponse(res, 200, resultado);
     } catch (e) {
       conectado = false;
-      return json(400, { error: e.message });
+      log('DOMU', `400 Erro: ${e.message}`);
+      return jsonResponse(res, 400, { error: e.message });
     }
   }
 
-  if (caminho === '/api/omie/produtos') {
-    if (!conectado) return json(400, { error: 'Conecte primeiro.' });
+  // GET /api/omie/produtos?q=PSAI
+  if (caminho === '/api/omie/produtos' && req.method === 'GET') {
     const q = (parsed.query.q || '').trim().toLowerCase();
-    if (q.length < 2) return json(400, { error: 'Minimo 2 caracteres.' });
+    log('DOMU', `GET /api/omie/produtos?q=${parsed.query.q || ''}`);
 
-    console.log('\n[BUSCA] "' + q + '"');
+    if (!conectado) {
+      log('DOMU', '400 Nao conectado');
+      return jsonResponse(res, 400, { error: 'Conecte-se ao Omie primeiro.' });
+    }
+
+    if (q.length < 2) {
+      log('DOMU', '400 Termo muito curto');
+      return jsonResponse(res, 400, { error: 'Minimo 2 caracteres para busca.' });
+    }
+
     try {
-      // Pagina 1 com muitos registros, filtro local
-      const todos = [];
-      let pagina = 1;
-      let totalPaginas = 1;
-      do {
-        const r = await chamarOmie('geral/produtos/', 'ListarProdutos', {
-          pagina,
-          registros_por_pagina: 200,
-          apenas_importado_api: 'N'
-        });
-        const lista = r.produto_servico_cadastro || [];
-        todos.push(...lista);
-        totalPaginas = r.total_de_paginas || 1;
-        pagina++;
-      } while (pagina <= totalPaginas && pagina <= 5); // max 5 paginas = 1000 produtos
+      const todos = await obterProdutosCache();
 
-      // Filtro local por codigo ou descricao
+      // Filtro local case insensitive em codigo E descricao
       const filtrados = todos.filter(p => {
         const cod = String(p.codigo_produto || '').toLowerCase();
         const desc = String(p.descricao || '').toLowerCase();
         return cod.includes(q) || desc.includes(q);
       });
 
-      console.log('[BUSCA] ' + todos.length + ' carregados, ' + filtrados.length + ' filtrados');
-      return json(200, { produtos: filtrados.slice(0, 30).map(mapProduto) });
+      log('DOMU FILTER', `termo="${parsed.query.q || ''}" => ${filtrados.length} resultados`);
+      const resultado = { produtos: filtrados.slice(0, MAX_RESULTADOS_BUSCA).map(mapProduto) };
+      log('DOMU', '200 OK');
+      return jsonResponse(res, 200, resultado);
     } catch (e) {
-      return json(500, { error: e.message });
+      return erroOmie(res, e);
     }
   }
 
-  if (caminho === '/api/omie/materiais') {
-    if (!conectado) return json(400, { error: 'Conecte primeiro.' });
-    console.log('\n[MATERIAIS] Carregando...');
+  // GET /api/omie/materiais?categoria=chapa-psai
+  if (caminho === '/api/omie/materiais' && req.method === 'GET') {
+    const categoria = (parsed.query.categoria || '').trim().toLowerCase();
+    log('DOMU', `GET /api/omie/materiais?categoria=${parsed.query.categoria || ''}`);
+
+    if (!conectado) {
+      log('DOMU', '400 Nao conectado');
+      return jsonResponse(res, 400, { error: 'Conecte-se ao Omie primeiro.' });
+    }
+
     try {
-      const todos = [];
-      let pagina = 1;
-      let totalPaginas = 1;
-      do {
-        const r = await chamarOmie('geral/produtos/', 'ListarProdutos', {
-          pagina,
-          registros_por_pagina: 200,
-          apenas_importado_api: 'N'
-        });
-        todos.push(...(r.produto_servico_cadastro || []));
-        totalPaginas = r.total_de_paginas || 1;
-        pagina++;
-      } while (pagina <= totalPaginas && pagina <= 5);
+      const todos = await obterProdutosCache();
 
-      console.log('[MATERIAIS] ' + todos.length + ' produtos');
-      return json(200, { produtos: todos.map(mapProduto) });
+      // Filtro por categoria (futuro — por enquanto retorna todos)
+      let filtrados = todos;
+      if (categoria) {
+        // Implementacao futura de filtro por categoria
+        // Por enquanto, pode-se usar como filtro simples no codigo/descricao
+        const termoCategoria = categoria.replace(/-/g, ' ').replace(/chapa\s*/i, '');
+        if (termoCategoria.length >= 2) {
+          filtrados = todos.filter(p => {
+            const cod = String(p.codigo_produto || '').toLowerCase();
+            const desc = String(p.descricao || '').toLowerCase();
+            return cod.includes(termoCategoria) || desc.includes(termoCategoria);
+          });
+        }
+      }
+
+      log('DOMU', `${filtrados.length} materiais retornados`);
+      log('DOMU', '200 OK');
+      return jsonResponse(res, 200, { produtos: filtrados.map(mapProduto) });
     } catch (e) {
-      return json(500, { error: e.message });
+      return erroOmie(res, e);
     }
   }
 
-  if (caminho === '/api/omie/produto-compra') {
-    if (!conectado) return json(400, { error: 'Conecte primeiro.' });
+  // GET /api/omie/produto-compra?id=xxx&codigo=yyy
+  if (caminho === '/api/omie/produto-compra' && req.method === 'GET') {
     const id = (parsed.query.id || '').trim();
     const codigo = (parsed.query.codigo || '').trim();
-    console.log('\n[COMPRA] id=' + id + ' codigo=' + codigo);
+    log('DOMU', `GET /api/omie/produto-compra?id=${id}&codigo=${codigo}`);
 
-    let produto = null;
-    if (codigo) {
-      try {
-        const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
-        if (r && r.codigo_produto) produto = mapProduto(r);
-      } catch (e) { console.log('  Nao achou por codigo'); }
-    }
-    if (!produto && id) {
-      try {
-        const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto_integracao: id });
-        if (r && r.codigo_produto) produto = mapProduto(r);
-      } catch (e) { console.log('  Nao achou por id'); }
+    if (!conectado) {
+      log('DOMU', '400 Nao conectado');
+      return jsonResponse(res, 400, { error: 'Conecte-se ao Omie primeiro.' });
     }
 
-    // Buscar ultima compra via estoque
-    let compraInfo = {
-      fonteCusto: 'nao_encontrado',
-      custoUnitario: 0,
-      custoLiquidoUnitario: 0,
-      dataUltimaCompra: '',
-      numeroNota: '',
-      cmc: 0,
-      saldo: 0,
-      ipi: 0,
-      icms: 0,
-      pisCofins: 0,
-      fiscalCompraCompleto: false,
-      criterioSelecao: '',
-      criterioVinculo: ''
-    };
+    if (!id && !codigo) {
+      log('DOMU', '400 Sem id ou codigo');
+      return jsonResponse(res, 400, { error: 'Informe id ou codigo do produto.' });
+    }
 
-    if (produto) {
-      // Tenta pegar posicao de estoque
-      try {
-        const est = await chamarOmie('estoque/consulta/', 'PosicaoEstoque', {
-          codigo_local_estoque: 0,
-          id_prod: Number(produto.id) || 0
-        });
-        if (est && est.saldo !== undefined) {
-          compraInfo.saldo = est.saldo || 0;
-          compraInfo.cmc = est.cmc || est.cmv || 0;
+    try {
+      let produto = null;
+      let produtoOmie = null;
+
+      // 1. Tenta ConsultarProduto por codigo
+      if (codigo) {
+        try {
+          log('OMIE', `ConsultarProduto codigo_produto="${codigo}"`);
+          const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
+          if (r && r.codigo_produto) {
+            produtoOmie = r;
+            produto = mapProduto(r);
+          }
+        } catch (e) {
+          log('DOMU', `ConsultarProduto por codigo falhou: ${e.message}`);
         }
-      } catch (e) { /* sem estoque */ }
+      }
 
-      // Usa valor_unitario como custo quando nao ha NF-e
-      compraInfo.fonteCusto = 'ultima_compra';
-      compraInfo.custoUnitario = produto.valorUnitario;
-      compraInfo.custoLiquidoUnitario = produto.valorUnitario;
-      compraInfo.criterioSelecao = 'valor_unitario_cadastro';
-      console.log('[COMPRA] Produto: ' + produto.codigo + ' custo=' + produto.valorUnitario);
+      // 2. Se nao achou, tenta por codigo_produto_integracao (id)
+      if (!produto && id) {
+        try {
+          log('OMIE', `ConsultarProduto codigo_produto_integracao="${id}"`);
+          const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto_integracao: id });
+          if (r && r.codigo_produto) {
+            produtoOmie = r;
+            produto = mapProduto(r);
+          }
+        } catch (e) {
+          log('DOMU', `ConsultarProduto por id falhou: ${e.message}`);
+        }
+      }
+
+      // Estrutura de compra padrao
+      let compra = {
+        fonteCusto: 'nao_encontrado',
+        custoUnitario: 0,
+        custoLiquidoUnitario: 0,
+        dataUltimaCompra: '',
+        numeroNota: '',
+        cmc: 0,
+        saldo: 0,
+        dataEstoque: '',
+        ipi: 0,
+        icms: 0,
+        pisCofins: 0,
+        fiscalCompraCompleto: false,
+        tributosOrigem: '',
+        valorUnitarioNota: 0,
+        criterioSelecao: '',
+        criterioVinculo: '',
+        tratamentoFiscal: null,
+        codigoProdutoNfe: '',
+        descricaoProdutoNfe: ''
+      };
+
+      if (produto) {
+        // 3. Tenta ListarPosEstoque para pegar CMC e saldo
+        try {
+          const hoje = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+          log('OMIE', `ListarPosEstoque para produto ${produto.codigo}`);
+          const est = await chamarOmie('estoque/consulta/', 'ListarPosEstoque', {
+            nPagina: 1,
+            nRegPorPagina: 100,
+            dDataPosicao: hoje,
+            cExibeTodos: 'S'
+          });
+
+          const produtos = est.produtos || [];
+          // Filtra pelo produto atual
+          const codProd = Number(id) || Number(produto.id) || 0;
+          const estoqueItem = produtos.find(e =>
+            e.nCodProd === codProd ||
+            String(e.cCodigo || '').toLowerCase() === String(produto.codigo || '').toLowerCase()
+          );
+
+          if (estoqueItem) {
+            compra.cmc = estoqueItem.nCMC || 0;
+            compra.saldo = estoqueItem.nSaldo || 0;
+            compra.dataEstoque = hoje;
+            log('DOMU', `Estoque encontrado: saldo=${compra.saldo} CMC=${compra.cmc}`);
+          }
+        } catch (e) {
+          log('DOMU', `ListarPosEstoque falhou: ${e.message}`);
+        }
+
+        // 4. Usa valor_unitario como custoUnitario
+        compra.fonteCusto = 'ultima_compra';
+        compra.custoUnitario = produto.valorUnitario;
+        compra.custoLiquidoUnitario = produto.valorUnitario;
+        compra.criterioSelecao = 'valor_unitario_cadastro';
+        compra.criterioVinculo = 'codigo_produto';
+        compra.codigoProdutoNfe = produto.codigo;
+        compra.descricaoProdutoNfe = produto.descricao;
+
+        log('DOMU', `Produto: ${produto.codigo} custoUnitario=${produto.valorUnitario}`);
+      }
+
+      log('DOMU', '200 OK');
+      return jsonResponse(res, 200, { produto, compra });
+    } catch (e) {
+      return erroOmie(res, e);
     }
-
-    return json(200, { produto, compra: compraInfo });
   }
 
   // ==================== STATIC FILES ====================
@@ -298,26 +498,38 @@ async function handler(req, res) {
   }
 
   // Qualquer outro arquivo estático na pasta
-  const arquivo = path.join(__dirname, caminho);
+  const arquivo = path.join(__dirname, decodeURIComponent(caminho));
+  // Seguranca: nao permitir traversal
+  if (!arquivo.startsWith(__dirname)) {
+    return jsonResponse(res, 403, { error: 'Acesso negado' });
+  }
+
   if (fs.existsSync(arquivo) && fs.statSync(arquivo).isFile()) {
     return servirArquivo(res, arquivo);
   }
 
-  json(404, { error: 'Nao encontrado: ' + caminho });
+  jsonResponse(res, 404, { error: 'Nao encontrado: ' + caminho });
 }
 
 // ============================================================
 // INICIAR SERVIDOR
 // ============================================================
-http.createServer(handler).listen(PORTA, () => {
+const server = http.createServer(handler);
+
+server.listen(PORTA, () => {
   console.log('');
   console.log('  =============================================');
-  console.log('  DOMU - Conector Omie');
+  console.log('  DOMU - Conector Omie v2');
   console.log('  =============================================');
   console.log('');
   console.log('  Acesse no navegador:');
-  console.log('  http://localhost:' + PORTA);
+  console.log(`  http://localhost:${PORTA}`);
   console.log('');
   console.log('  NAO feche esta janela enquanto usa o DOMU.');
   console.log('');
 });
+
+// Export para testes
+if (typeof module !== 'undefined') {
+  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, PORTA };
+}
