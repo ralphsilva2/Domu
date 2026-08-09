@@ -796,8 +796,7 @@ async function executarTestes() {
 
     const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
-    // cadastro tem valor_unitario=200, mas custo REAL e 146.36
-    assert.strictEqual(r.body.produto.valorUnitario, 200.00);
+    // custoUnitario REAL vem da nota (146.36), NUNCA do cadastro (200)
     assert.strictEqual(r.body.compra.custoUnitario, 146.36);
     assert.notStrictEqual(r.body.compra.custoUnitario, 200.00);
     assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
@@ -1895,18 +1894,36 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
-  // 56. Zero ConsultarProduto quando ID já disponível e cache populado
+  // 56. Zero ConsultarProduto quando ID já disponível — cache vazio E populado
   // ----------------------------------------------------------
-  await teste('Zero ConsultarProduto quando ID disponivel e produto no cache', async () => {
-    // Reconectar e popular cache com produto que tem id=11835150482
+  await teste('Zero ConsultarProduto com ID disponivel: cache vazio E populado', async () => {
+    // Reconectar com cache limpo
     setMockResponses({
-      produto_servico_cadastro: [{codigo_produto:"11835150482",codigo:"4084438",descricao:"CHAPA PSAI BRANCO TRICAMADA",unidade:"CH",ncm:"3920.30.00",valor_unitario:32.30,inativo:"N"}],
+      produto_servico_cadastro: [{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}],
       total_de_paginas:1, total_de_registros:1, pagina:1, registros_por_pagina:1
     }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
     await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
     await pausa();
 
-    // Popular o cache
+    // TESTE A: cache VAZIO — ConsultarProduto deve ser 0
+    mockCalls = [];
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar:[{idMov:1,idDoc:7001,idProd:11835150482,dtMov:'15/07/2026',operacao:'21',cancelamento:'N',devolucao:'N',qtde:10,valor:255}], nTotPaginas:1 };
+      if (parsed.call === 'ConsultarNotaEnt') return { cabec:{cNumNFe:"77001",dtEmissao:"15/07/2026"}, produtos:[{nCodProd:11835150482,nValUnit:25.50}] };
+      if (parsed.call === 'PosicaoEstoque') return { saldo:0, cmc:22.32, fisico:0, reservado:0 };
+      if (parsed.call === 'ConsultarRecebimento') return {};
+      if (parsed.call === 'ListarProdutos') return { produto_servico_cadastro:[], total_de_paginas:1 };
+      return {};
+    });
+
+    const r1 = await requisicaoLocal('GET','/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r1.status, 200);
+    const cpCalls1 = mockCalls.filter(c => c.parsed?.call === 'ConsultarProduto');
+    assert.strictEqual(cpCalls1.length, 0, 'Cache VAZIO: zero ConsultarProduto');
+    assert.strictEqual(r1.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r1.body.compra.custoUnitario, 25.50);
+
+    // TESTE B: popular cache e repetir
     setMockResponses({
       produto_servico_cadastro: [{codigo_produto:"11835150482",codigo:"4084438",descricao:"CHAPA PSAI BRANCO TRICAMADA",unidade:"CH",ncm:"3920.30.00",valor_unitario:32.30,inativo:"N"}],
       total_de_paginas:1, total_de_registros:1, pagina:1, registros_por_pagina:200
@@ -1914,7 +1931,6 @@ async function executarTestes() {
     await requisicaoLocal('GET','/api/omie/produtos?q=PSAI');
     await pausa();
 
-    // Agora chamar produto-compra com ID e codigo
     mockCalls = [];
     setMockRouter((parsed) => {
       if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar:[{idMov:1,idDoc:7001,idProd:11835150482,dtMov:'15/07/2026',operacao:'21',cancelamento:'N',devolucao:'N',qtde:10,valor:255}], nTotPaginas:1 };
@@ -1924,13 +1940,15 @@ async function executarTestes() {
       return {};
     });
 
-    const r = await requisicaoLocal('GET','/api/omie/produto-compra?id=11835150482&codigo=4084438');
-    assert.strictEqual(r.status, 200);
-    // Verificar que ConsultarProduto NAO foi chamado
-    const cpCalls = mockCalls.filter(c => c.parsed?.call === 'ConsultarProduto');
-    assert.strictEqual(cpCalls.length, 0, 'Zero ConsultarProduto quando ID disponivel + cache');
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
-    assert.strictEqual(r.body.compra.custoUnitario, 25.50);
+    const r2 = await requisicaoLocal('GET','/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r2.status, 200);
+    const cpCalls2 = mockCalls.filter(c => c.parsed?.call === 'ConsultarProduto');
+    assert.strictEqual(cpCalls2.length, 0, 'Cache POPULADO: zero ConsultarProduto');
+    assert.strictEqual(r2.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r2.body.compra.custoUnitario, 25.50);
+    // Com cache populado, produto completo
+    assert.strictEqual(r2.body.produto.id, '11835150482');
+    assert.strictEqual(r2.body.produto.codigo, '4084438');
   });
 
   await pausa();

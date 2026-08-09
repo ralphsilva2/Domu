@@ -988,35 +988,24 @@ async function handler(req, res) {
       let produto = null;
       let idProd = null;
 
-      // --- PASSO 1: Identificar produto SEM chamada desnecessária ---
-      // Se ID está disponível, usar diretamente. Buscar dados no cache.
+      // --- PASSO 1: Identificar produto SEM ConsultarProduto quando ID disponível ---
       if (id) {
         idProd = id;
-        // Tentar encontrar no cache do catálogo (evita ConsultarProduto)
+        // Tentar encontrar no cache do catálogo
         if (cacheProdutos.length > 0) {
           const cached = cacheProdutos.find(p =>
             String(p.codigo_produto) === String(id) || String(p.codigo) === String(codigo)
           );
           if (cached) produto = mapProduto(cached);
         }
-        // Se não encontrou no cache, buscar via API (necessário para r.body.produto)
+        // Se não encontrou no cache, montar objeto mínimo com dados disponíveis
+        // NUNCA chamar ConsultarProduto quando ID já existe
         if (!produto) {
-          try {
-            const r2 = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo_produto: id });
-            if (r2 && r2.codigo_produto) { produto = mapProduto(r2); idProd = r2.codigo_produto; }
-          } catch (e) {
-            // Se codigo disponível, tentar por codigo
-            if (codigo) {
-              try {
-                const r3 = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
-                if (r3 && r3.codigo_produto) { produto = mapProduto(r3); idProd = r3.codigo_produto; }
-              } catch (e2) { log('DOMU', `ConsultarProduto falhou: ${e2.message}`); }
-            }
-          }
+          produto = { id: String(id), codigo: String(codigo || ''), descricao: '', unidade: '', ncm: '', valorUnitario: 0, tipoItem: '', inativo: 'N' };
         }
       }
 
-      // Só chama ConsultarProduto se NÃO temos idProd e temos apenas codigo
+      // Só chama ConsultarProduto se NÃO temos idProd (apenas codigo sem id)
       if (!idProd && codigo) {
         try {
           log('OMIE', `ConsultarProduto codigo_produto="${codigo}"`);
