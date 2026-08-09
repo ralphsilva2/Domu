@@ -464,9 +464,21 @@ async function executarTestes() {
 
 
   // ----------------------------------------------------------
-  // 8. GET /api/omie/materiais — retorna lista de materiais
+  // 8. GET /api/omie/materiais — retorna lista de materiais (com estoque DOMU)
   // ----------------------------------------------------------
-  await teste('GET /api/omie/materiais — retorna produtos', async () => {
+  await teste('GET /api/omie/materiais — retorna produtos PSAI com estoque', async () => {
+    // Mock PosicaoEstoque for the PSAI candidates in cache
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'PosicaoEstoque') {
+        const idProd = parsed.param[0].id_prod;
+        // PSAI-050 (id=101), PSAI-075 (id=102) have stock
+        if (idProd === 101 || idProd === 102) return { saldo: 10, fisico: 10, cmc: 50, reservado: 0 };
+        return { saldo: 0, fisico: 0, cmc: 0, reservado: 0 };
+      }
+      return {};
+    });
+
     const r = await requisicaoLocal('GET', '/api/omie/materiais?categoria=chapa-psai');
     assert.strictEqual(r.status, 200);
     assert(Array.isArray(r.body.produtos));
@@ -1161,25 +1173,28 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
-  // 32. Filtro tipoItem=01: só matéria-prima aparece
+  // 32. Busca geral: acrilico retorna chapas acrilico (qualquer tipoItem)
   // ----------------------------------------------------------
-  await teste('Filtro tipoItem: so materia-prima aparece, produto acabado nao', async () => {
+  await teste('Busca geral: acrilico retorna chapas acrilico independente de tipoItem', async () => {
     setMockResponses({
       produto_servico_cadastro: [
-        {codigo_produto: "501", codigo: "PSAI-MP", descricao: "CHAPA PSAI MATERIA PRIMA", unidade: "CH", ncm: "3920.30.00", valor_unitario: 50, tipoItem: "01", inativo: "N"},
-        {codigo_produto: "502", codigo: "PSAI-PA", descricao: "BANDEJA PSAI PRODUTO ACABADO", unidade: "UN", ncm: "3920.30.00", valor_unitario: 120, tipoItem: "04", inativo: "N"},
-        {codigo_produto: "503", codigo: "PSAI-INAT", descricao: "CHAPA PSAI INATIVA", unidade: "CH", ncm: "3920.30.00", valor_unitario: 45, tipoItem: "01", inativo: "S"},
-        {codigo_produto: "504", codigo: "MDF-MP", descricao: "CHAPA MDF MATERIA PRIMA", unidade: "CH", ncm: "4411.12.10", valor_unitario: 90, tipoItem: "01", inativo: "N"}
+        {codigo_produto: "601", codigo: "ACR-CRI-2", descricao: "CHAPA ACRILICO CRISTAL 2MM 1000X2000", unidade: "CH", ncm: "3926.90.90", valor_unitario: 200, tipoItem: "03", inativo: "N"},
+        {codigo_produto: "602", codigo: "ACR-BRA-6", descricao: "CHAPA ACRILICO BRANCO 6MM 1000X2000", unidade: "CH", ncm: "3926.90.90", valor_unitario: 350, tipoItem: "01", inativo: "N"},
+        {codigo_produto: "603", codigo: "COLA-ACR", descricao: "COLA PARA ACRILICO 500ML", unidade: "UN", ncm: "3506.10.90", valor_unitario: 45, tipoItem: "01", inativo: "N"},
+        {codigo_produto: "604", codigo: "PSAI-050", descricao: "CHAPA PSAI CRISTAL 0,50MM", unidade: "CH", ncm: "3920.30.00", valor_unitario: 45, tipoItem: "01", inativo: "N"},
+        {codigo_produto: "605", codigo: "ACR-INAT", descricao: "CHAPA ACRILICO INATIVA", unidade: "CH", ncm: "3926.90.90", valor_unitario: 100, tipoItem: "01", inativo: "S"}
       ],
-      total_de_paginas: 1, total_de_registros: 4, pagina: 1, registros_por_pagina: 200
+      total_de_paginas: 1, total_de_registros: 5, pagina: 1, registros_por_pagina: 200
     });
 
-    const r = await requisicaoLocal('GET', '/api/omie/produtos?q=PSAI');
+    const r = await requisicaoLocal('GET', '/api/omie/produtos?q=acrilico');
     assert.strictEqual(r.status, 200);
-    // Deve retornar SOMENTE a MP ativa com PSAI
-    assert.strictEqual(r.body.produtos.length, 1);
-    assert.strictEqual(r.body.produtos[0].codigo, 'PSAI-MP');
-    assert.strictEqual(r.body.produtos[0].id, '501');
+    assert.strictEqual(r.body.produtos.length, 3);
+    const codigos = r.body.produtos.map(p => p.codigo);
+    assert(codigos.includes('ACR-CRI-2'), 'Deve incluir ACR-CRI-2 (tipoItem=03)');
+    assert(codigos.includes('ACR-BRA-6'), 'Deve incluir ACR-BRA-6');
+    assert(codigos.includes('COLA-ACR'), 'Deve incluir COLA-ACR');
+    assert(!codigos.includes('ACR-INAT'), 'NAO deve incluir inativo');
   });
 
   await pausa();
@@ -1212,6 +1227,184 @@ async function executarTestes() {
     assert.strictEqual(r.body.produtos[0].codigo, 'PSAI-001');
     // NUNCA: codigo = '1661181502'
     assert.notStrictEqual(r.body.produtos[0].codigo, '1661181502');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 34. Categoria chapa-acrilico: filtra por regra + estoque DOMU
+  // ----------------------------------------------------------
+  await teste('Categoria chapa-acrilico: filtra por regra + estoque DOMU', async () => {
+    setMockResponses({
+      produto_servico_cadastro: [{codigo_produto: "101", codigo: "PSAI-050", descricao: "CHAPA PSAI", unidade: "CH", ncm: "3920.30.00", valor_unitario: 45, inativo: "N"}],
+      total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU"}]
+    });
+    await requisicaoLocal('POST', '/api/omie/test', {appKey: '1234567890', appSecret: 'segredo-secreto-123'});
+    await pausa();
+
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ListarProdutos') return {
+        produto_servico_cadastro: [
+          {codigo_produto: "801", codigo: "ACR-CRI-2", descricao: "CHAPA ACRILICO CRISTAL 2MM", unidade: "CH", ncm: "3926.90.90", valor_unitario: 200, tipoItem: "03", inativo: "N"},
+          {codigo_produto: "802", codigo: "ACR-BRA-6", descricao: "CHAPA ACRILICO BRANCO 6MM", unidade: "CH", ncm: "3926.90.90", valor_unitario: 350, inativo: "N"},
+          {codigo_produto: "803", codigo: "PSAI-050", descricao: "CHAPA PSAI CRISTAL 0,50MM", unidade: "CH", ncm: "3920.30.00", valor_unitario: 45, inativo: "N"},
+          {codigo_produto: "805", codigo: "ACR-SEM-EST", descricao: "CHAPA ACRILICO SEM ESTOQUE", unidade: "CH", ncm: "3926.90.90", valor_unitario: 150, inativo: "N"}
+        ],
+        total_de_paginas: 1, total_de_registros: 4, pagina: 1, registros_por_pagina: 200
+      };
+      if (call === 'PosicaoEstoque') {
+        const idProd = parsed.param[0].id_prod;
+        if (idProd === 801) return { saldo: 10, fisico: 10, cmc: 200, reservado: 0 };
+        if (idProd === 802) return { saldo: 5, fisico: 5, cmc: 350, reservado: 0 };
+        if (idProd === 805) return { saldo: 0, fisico: 0, cmc: 150, reservado: 0 };
+        return { saldo: 0, fisico: 0, cmc: 0, reservado: 0 };
+      }
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/materiais?categoria=chapa-acrilico');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.produtos.length, 2);
+    const codigos = r.body.produtos.map(p => p.codigo);
+    assert(codigos.includes('ACR-CRI-2'), 'Deve incluir ACR-CRI-2 (tem estoque)');
+    assert(codigos.includes('ACR-BRA-6'), 'Deve incluir ACR-BRA-6 (tem estoque)');
+    assert(!codigos.includes('ACR-SEM-EST'), 'NAO deve incluir sem estoque');
+    assert(!codigos.includes('PSAI-050'), 'NAO deve incluir PSAI');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 35. Categoria chapa-psai: filtra PSAI corretamente
+  // ----------------------------------------------------------
+  await teste('Categoria chapa-psai: filtra por regra PSAI', async () => {
+    // Force cache refresh by reconnecting
+    setMockResponses({
+      produto_servico_cadastro: [{codigo_produto: "101", codigo: "X", descricao: "X", unidade: "UN", inativo: "N"}],
+      total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU"}]
+    });
+    await requisicaoLocal('POST', '/api/omie/test', {appKey: '1234567890', appSecret: 'segredo-secreto-123'});
+    await pausa();
+
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ListarProdutos') return {
+        produto_servico_cadastro: [
+          {codigo_produto: "801", codigo: "ACR-CRI-2", descricao: "CHAPA ACRILICO 2MM", unidade: "CH", inativo: "N"},
+          {codigo_produto: "803", codigo: "PSAI-050", descricao: "CHAPA PSAI CRISTAL 0,50MM", unidade: "CH", inativo: "N"},
+          {codigo_produto: "806", codigo: "PSAI-100", descricao: "CHAPA PSAI BRANCO 1,00MM", unidade: "CH", inativo: "N"}
+        ],
+        total_de_paginas: 1, total_de_registros: 3, pagina: 1, registros_por_pagina: 200
+      };
+      if (call === 'PosicaoEstoque') {
+        const idProd = parsed.param[0].id_prod;
+        if (idProd === 803) return { saldo: 20, fisico: 20, cmc: 45, reservado: 0 };
+        if (idProd === 806) return { saldo: 15, fisico: 15, cmc: 60, reservado: 0 };
+        return { saldo: 0, fisico: 0, cmc: 0, reservado: 0 };
+      }
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/materiais?categoria=chapa-psai');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.produtos.length, 2);
+    const codigos = r.body.produtos.map(p => p.codigo);
+    assert(codigos.includes('PSAI-050'), 'Deve incluir PSAI-050');
+    assert(codigos.includes('PSAI-100'), 'Deve incluir PSAI-100');
+    assert(!codigos.includes('ACR-CRI-2'), 'NAO deve incluir acrilico');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 36. Categoria chapa-mdf: filtra MDF corretamente
+  // ----------------------------------------------------------
+  await teste('Categoria chapa-mdf: filtra por regra MDF', async () => {
+    // Force cache refresh
+    setMockResponses({
+      produto_servico_cadastro: [{codigo_produto: "101", codigo: "X", descricao: "X", unidade: "UN", inativo: "N"}],
+      total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU"}]
+    });
+    await requisicaoLocal('POST', '/api/omie/test', {appKey: '1234567890', appSecret: 'segredo-secreto-123'});
+    await pausa();
+
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ListarProdutos') return {
+        produto_servico_cadastro: [
+          {codigo_produto: "804", codigo: "MDF-060", descricao: "CHAPA MDF CRU 6MM", unidade: "CH", inativo: "N"},
+          {codigo_produto: "807", codigo: "MDF-150", descricao: "CHAPA MDF BRANCO 15MM", unidade: "CH", inativo: "N"},
+          {codigo_produto: "803", codigo: "PSAI-050", descricao: "CHAPA PSAI 0,50MM", unidade: "CH", inativo: "N"}
+        ],
+        total_de_paginas: 1, total_de_registros: 3, pagina: 1, registros_por_pagina: 200
+      };
+      if (call === 'PosicaoEstoque') {
+        const idProd = parsed.param[0].id_prod;
+        if (idProd === 804) return { saldo: 30, fisico: 30, cmc: 90, reservado: 0 };
+        if (idProd === 807) return { saldo: 8, fisico: 8, cmc: 200, reservado: 0 };
+        return { saldo: 0, fisico: 0, cmc: 0, reservado: 0 };
+      }
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/materiais?categoria=chapa-mdf');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.produtos.length, 2);
+    const codigos = r.body.produtos.map(p => p.codigo);
+    assert(codigos.includes('MDF-060'), 'Deve incluir MDF-060');
+    assert(codigos.includes('MDF-150'), 'Deve incluir MDF-150');
+    assert(!codigos.includes('PSAI-050'), 'NAO deve incluir PSAI');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 37. Categoria tubo-quadrado: filtra tubos quadrados e metalon
+  // ----------------------------------------------------------
+  await teste('Categoria tubo-quadrado: filtra tubos quadrados e metalon', async () => {
+    // Force cache refresh
+    setMockResponses({
+      produto_servico_cadastro: [{codigo_produto: "101", codigo: "X", descricao: "X", unidade: "UN", inativo: "N"}],
+      total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU"}]
+    });
+    await requisicaoLocal('POST', '/api/omie/test', {appKey: '1234567890', appSecret: 'segredo-secreto-123'});
+    await pausa();
+
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ListarProdutos') return {
+        produto_servico_cadastro: [
+          {codigo_produto: "901", codigo: "TQ-2020", descricao: "TUBO QUADRADO ACO 20X20X1,20MM", unidade: "UN", inativo: "N"},
+          {codigo_produto: "902", codigo: "METALON-30", descricao: "METALON 30X30X1,50MM", unidade: "UN", inativo: "N"},
+          {codigo_produto: "903", codigo: "TR-2500", descricao: "TUBO REDONDO ACO 25MM", unidade: "UN", inativo: "N"}
+        ],
+        total_de_paginas: 1, total_de_registros: 3, pagina: 1, registros_por_pagina: 200
+      };
+      if (call === 'PosicaoEstoque') {
+        const idProd = parsed.param[0].id_prod;
+        if (idProd === 901) return { saldo: 50, fisico: 50, cmc: 32, reservado: 0 };
+        if (idProd === 902) return { saldo: 30, fisico: 30, cmc: 48, reservado: 0 };
+        if (idProd === 903) return { saldo: 40, fisico: 40, cmc: 28, reservado: 0 };
+        return { saldo: 0, fisico: 0, cmc: 0, reservado: 0 };
+      }
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/materiais?categoria=tubo-quadrado');
+    assert.strictEqual(r.status, 200);
+    const codigos = r.body.produtos.map(p => p.codigo);
+    assert(codigos.includes('TQ-2020'), 'Deve incluir tubo quadrado');
+    assert(codigos.includes('METALON-30'), 'Deve incluir metalon');
+    assert(!codigos.includes('TR-2500'), 'NAO deve incluir tubo redondo');
   });
 
   await pausa();

@@ -126,7 +126,8 @@ function mapProduto(p) {
 }
 
 // ============================================================
-// PAGINAÇÃO COMPLETA — Carrega TODOS os produtos do Omie
+// PAGINAÇÃO COMPLETA — Carrega TODOS os produtos ATIVOS do Omie
+// NÃO filtra por tipoItem — o catálogo completo é necessário.
 // ============================================================
 async function carregarTodosProdutos() {
   const todos = [];
@@ -140,11 +141,11 @@ async function carregarTodosProdutos() {
       registros_por_pagina: REGISTROS_POR_PAGINA,
       apenas_importado_api: 'N',
       filtrar_apenas_omiepdv: 'N',
-      filtrar_apenas_tipo: '01'
+      inativo: 'N'
     });
 
     const lista = (r.produto_servico_cadastro || []).filter(p =>
-      String(p.tipoItem || '') === '01' && String(p.inativo || 'N') !== 'S'
+      String(p.inativo || 'N') !== 'S'
     );
     todos.push(...lista);
     totalPaginas = r.total_de_paginas || 1;
@@ -159,6 +160,84 @@ async function carregarTodosProdutos() {
   } while (pagina <= totalPaginas);
 
   return todos;
+}
+
+
+// ============================================================
+// BUSCA COM PONTUAÇÃO — Relevância por código e descrição
+// ============================================================
+function normalizarBusca(str) {
+  return String(str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+}
+
+function normalizarCodigoBusca(str) {
+  return normalizarBusca(str).replace(/[-_.\s]/g, '');
+}
+
+function pontuarProduto(produto, consulta) {
+  const termo = normalizarBusca(consulta);
+  const codigo = normalizarBusca(produto.codigo || produto.codigo_produto || '');
+  const codigoCompacto = normalizarCodigoBusca(produto.codigo || produto.codigo_produto || '');
+  const termoCompacto = normalizarCodigoBusca(consulta);
+  const descricao = normalizarBusca(produto.descricao || '');
+
+  if (codigo === termo || (termoCompacto && codigoCompacto === termoCompacto)) return 0;
+  if (codigo.startsWith(termo) || (termoCompacto && codigoCompacto.startsWith(termoCompacto))) return 1;
+  if (codigo.includes(termo) || (termoCompacto && codigoCompacto.includes(termoCompacto))) return 2;
+  if (descricao.startsWith(termo)) return 3;
+  if (descricao.includes(termo)) return 4;
+
+  // Múltiplas palavras: todas presentes na descricao ou codigo
+  const palavras = termo.split(/\s+/).filter(p => p.length >= 2);
+  if (palavras.length > 1) {
+    const textoCompleto = codigo + ' ' + descricao;
+    if (palavras.every(p => textoCompleto.includes(p))) return 4;
+  }
+
+  return -1; // Não corresponde
+}
+
+
+// ============================================================
+// REGRAS DE CATEGORIA MATERIAL — Classificação DOMU
+// ============================================================
+const REGRAS_CATEGORIA_MATERIAL = {
+  'chapa-mdf': texto =>
+    texto.includes('mdf'),
+
+  'chapa-psai': texto =>
+    texto.includes('psai') || /\bps\s*ai\b/.test(texto),
+
+  'chapa-aco': texto =>
+    texto.includes('chapa') &&
+    (texto.includes('aco') || texto.includes('inox')),
+
+  'chapa-acrilico': texto =>
+    texto.includes('acril'),
+
+  'chapa-petg': texto =>
+    texto.includes('petg'),
+
+  'tubo-quadrado': texto =>
+    texto.includes('metalon') ||
+    (texto.includes('tubo') &&
+      (texto.includes('quadr') || /\btubo\s+quad\b/.test(texto))),
+
+  'tubo-redondo': texto =>
+    texto.includes('tubo') &&
+    (texto.includes('redond') || /\btubo\s+red\b/.test(texto)),
+
+  'arame': texto =>
+    texto.includes('arame')
+};
+
+function produtoPertenceCategoria(produto, categoria) {
+  const regra = REGRAS_CATEGORIA_MATERIAL[categoria];
+  if (!regra) return false;
+  const texto = normalizarBusca(
+    `${produto.codigo || ''} ${produto.descricao || ''}`
+  );
+  return regra(texto);
 }
 
 
@@ -671,8 +750,8 @@ async function handler(req, res) {
 
   // GET /api/omie/produtos?q=PSAI
   if (caminho === '/api/omie/produtos' && req.method === 'GET') {
-    const q = (parsed.query.q || '').trim().toLowerCase();
-    log('DOMU', `GET /api/omie/produtos?q=${parsed.query.q || ''}`);
+    const q = (parsed.query.q || '').trim();
+    log('DOMU', `GET /api/omie/produtos?q=${q}`);
 
     if (!conectado) {
       log('DOMU', '400 Nao conectado');
@@ -687,15 +766,18 @@ async function handler(req, res) {
     try {
       const todos = await obterProdutosCache();
 
-      // Filtro local case insensitive em codigo E descricao
-      const filtrados = todos.filter(p => {
-        const cod = String(p.codigo || p.codigo_produto || '').toLowerCase();
-        const desc = String(p.descricao || '').toLowerCase();
-        return cod.includes(q) || desc.includes(q);
-      });
+      // Busca com pontuação — NÃO filtra por tipoItem
+      const pontuados = [];
+      for (const p of todos) {
+        const score = pontuarProduto(p, q);
+        if (score >= 0) pontuados.push({ p, score });
+      }
 
-      log('DOMU FILTER', `termo="${parsed.query.q || ''}" => ${filtrados.length} resultados`);
-      const resultado = { produtos: filtrados.slice(0, MAX_RESULTADOS_BUSCA).map(mapProduto) };
+      // Ordena por relevancia (menor score = mais relevante)
+      pontuados.sort((a, b) => a.score - b.score);
+
+      const resultado = { produtos: pontuados.slice(0, MAX_RESULTADOS_BUSCA).map(item => mapProduto(item.p)) };
+      log('DOMU FILTER', `termo="${q}" => ${pontuados.length} resultados`);
       log('DOMU', '200 OK');
       return jsonResponse(res, 200, resultado);
     } catch (e) {
@@ -705,6 +787,10 @@ async function handler(req, res) {
 
 
   // GET /api/omie/materiais?categoria=chapa-psai
+  // ============================================================
+  // CATÁLOGO DE MATÉRIAS-PRIMAS para orçamento.
+  // Fluxo: catálogo ativo → regra de categoria DOMU → PosicaoEstoque DOMU → saldo/fisico > 0
+  // ============================================================
   if (caminho === '/api/omie/materiais' && req.method === 'GET') {
     const categoria = (parsed.query.categoria || '').trim().toLowerCase();
     log('DOMU', `GET /api/omie/materiais?categoria=${parsed.query.categoria || ''}`);
@@ -714,24 +800,65 @@ async function handler(req, res) {
       return jsonResponse(res, 400, { error: 'Conecte-se ao Omie primeiro.' });
     }
 
+    if (!categoria) {
+      log('DOMU', '400 Categoria obrigatoria');
+      return jsonResponse(res, 400, { error: 'Informe a categoria do material.' });
+    }
+
+    if (!REGRAS_CATEGORIA_MATERIAL[categoria]) {
+      log('DOMU', `400 Categoria desconhecida: ${categoria}`);
+      return jsonResponse(res, 400, { error: `Categoria desconhecida: ${categoria}. Validas: ${Object.keys(REGRAS_CATEGORIA_MATERIAL).join(', ')}` });
+    }
+
     try {
       const todos = await obterProdutosCache();
 
-      let filtrados = todos;
-      if (categoria) {
-        const termoCategoria = categoria.replace(/-/g, ' ').replace(/chapa\s*/i, '');
-        if (termoCategoria.length >= 2) {
-          filtrados = todos.filter(p => {
-            const cod = String(p.codigo || p.codigo_produto || '').toLowerCase();
-            const desc = String(p.descricao || '').toLowerCase();
-            return cod.includes(termoCategoria) || desc.includes(termoCategoria);
-          });
-        }
+      // Passo 1: filtrar por regra de categoria
+      const candidatos = todos.filter(p => produtoPertenceCategoria(p, categoria));
+      log('DOMU', `Categoria "${categoria}": ${candidatos.length} candidatos`);
+
+      // Passo 2: verificar estoque DOMU (saldo > 0 OU fisico > 0)
+      let materiaisDisponiveis = [];
+      if (codigoEstoqueDomu !== null && candidatos.length > 0) {
+        const resultados = await Promise.all(
+          candidatos.map(async (p) => {
+            const idProd = p.codigo_produto || p.codigo_produto_integracao;
+            if (!idProd) return null;
+            try {
+              const est = await chamarOmie('estoque/consulta/', 'PosicaoEstoque', {
+                id_prod: Number(idProd),
+                codigo_local_estoque: codigoEstoqueDomu,
+                data: dataHoje()
+              });
+              const saldo = est.saldo || 0;
+              const fisico = est.fisico || 0;
+              if (saldo > 0 || fisico > 0) {
+                return { produto: p, saldo, fisico };
+              }
+              return null;
+            } catch (e) {
+              // Produto sem posição de estoque — não inclui
+              return null;
+            }
+          })
+        );
+        materiaisDisponiveis = resultados.filter(r => r !== null);
+      } else if (codigoEstoqueDomu === null) {
+        // Estoque DOMU não identificado: retorna candidatos sem filtro de estoque
+        log('DOMU', 'AVISO: Estoque DOMU nao identificado, retornando candidatos sem filtro de estoque');
+        materiaisDisponiveis = candidatos.map(p => ({ produto: p, saldo: 0, fisico: 0 }));
       }
 
-      log('DOMU', `${filtrados.length} materiais retornados`);
+      const produtos = materiaisDisponiveis.map(r => {
+        const mapped = mapProduto(r.produto);
+        mapped.saldoEstoque = r.saldo;
+        mapped.fisicoEstoque = r.fisico;
+        return mapped;
+      });
+
+      log('DOMU', `${produtos.length} materiais com estoque DOMU retornados`);
       log('DOMU', '200 OK');
-      return jsonResponse(res, 200, { produtos: filtrados.map(mapProduto) });
+      return jsonResponse(res, 200, { produtos });
     } catch (e) {
       return erroOmie(res, e);
     }
@@ -927,5 +1054,5 @@ server.listen(PORTA, () => {
 
 // Export para testes
 if (typeof module !== 'undefined') {
-  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, descobrirEstoqueDomu, PORTA };
+  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, descobrirEstoqueDomu, pontuarProduto, normalizarBusca, normalizarCodigoBusca, produtoPertenceCategoria, REGRAS_CATEGORIA_MATERIAL, PORTA };
 }
