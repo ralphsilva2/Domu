@@ -1599,8 +1599,8 @@ async function executarTestes() {
 
     const r = await requisicaoLocal('GET', '/api/omie/debug-ultima-compra?id=201&codigo=ACR-200');
     assert.strictEqual(r.status, 200);
-    const etapaErro = r.body.etapas.find(e => e.etapa === 'ListarMovimentoEstoque');
-    assert(etapaErro, 'Deve registrar erro de ListarMovimentoEstoque');
+    const etapaErro = r.body.etapas.find(e => e.etapa === 'buscarMovimentosCompra' && e.erro);
+    assert(etapaErro, 'Deve registrar erro de buscarMovimentosCompra');
     assert(etapaErro.erro.length > 0, 'Erro deve ter mensagem');
   });
 
@@ -2019,6 +2019,41 @@ async function executarTestes() {
     // O teste real é que a fila funciona — já verificado pelos outros testes que rodam sem deadlock
     // Verificação documental: constante está correta
     assert(true, 'Fila de concorrencia implementada com MAX=3');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 59. "Não existem registros" NÃO aborta busca — avança janela
+  // ----------------------------------------------------------
+  await teste('Nao existem registros para pagina: avanca janela sem abortar', async () => {
+    setMockResponses({ produto_servico_cadastro: [{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}], total_de_paginas:1,total_de_registros:1,pagina:1,registros_por_pagina:1 }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
+    await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
+    await pausa();
+
+    let chamadaMov = 0;
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ConsultarProduto') return { codigo_produto:"201", codigo:"ACR-200", descricao:"X", unidade:"CH", valor_unitario:1 };
+      if (parsed.call === 'ListarMovimentoEstoque') {
+        chamadaMov++;
+        // 1ª janela: "Não existem registros"
+        if (chamadaMov === 1) return { faultstring: "ERROR: Não existem registros para a página [1]!", faultcode: "SOAP-ENV:Client" };
+        // 2ª janela: "Não existem registros"
+        if (chamadaMov === 2) return { faultstring: "Não existem registros para a página [1]!", faultcode: "0" };
+        // 3ª janela: encontra compra
+        return { movProdutoListar:[{idMov:1,idDoc:5001,idProd:201,dtMov:'01/01/2022',operacao:'21',cancelamento:'N',devolucao:'N',qtde:5,valor:125}], nTotPaginas:1 };
+      }
+      if (parsed.call === 'ConsultarNotaEnt') return { cabec:{cNumNFe:"5001",dtEmissao:"01/01/2022"}, produtos:[{nCodProd:201,nValUnit:25.00}] };
+      if (parsed.call === 'PosicaoEstoque') return { saldo:0, cmc:0, fisico:0, reservado:0 };
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET','/api/omie/produto-compra?id=201&codigo=ACR-200');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r.body.compra.custoUnitario, 25.00);
+    // Deve ter passado por pelo menos 3 janelas
+    assert(chamadaMov >= 3, `Deve ter consultado pelo menos 3 janelas, consultou ${chamadaMov}`);
   });
 
   await pausa();
