@@ -136,7 +136,8 @@ async function carregarTodosProdutos() {
     const r = await chamarOmie('geral/produtos/', 'ListarProdutos', {
       pagina,
       registros_por_pagina: REGISTROS_POR_PAGINA,
-      apenas_importado_api: 'N'
+      apenas_importado_api: 'N',
+      filtrar_apenas_omiepdv: 'N'
     });
 
     const lista = r.produto_servico_cadastro || [];
@@ -632,7 +633,8 @@ async function handler(req, res) {
       const r = await chamarOmie('geral/produtos/', 'ListarProdutos', {
         pagina: 1,
         registros_por_pagina: 1,
-        apenas_importado_api: 'N'
+        apenas_importado_api: 'N',
+        filtrar_apenas_omiepdv: 'N'
       });
 
       conectado = true;
