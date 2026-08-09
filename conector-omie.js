@@ -845,7 +845,48 @@ async function handler(req, res) {
   }
 
 
-  // ==================== STATIC FILES ====================
+  // GET /api/omie/debug-campos?q=PSAI (TEMPORÁRIO — diagnóstico de campos brutos)
+  if (caminho === '/api/omie/debug-campos' && req.method === 'GET') {
+    const q = (parsed.query.q || '').trim().toLowerCase();
+    log('DOMU', `GET /api/omie/debug-campos?q=${parsed.query.q || ''}`);
+
+    if (!conectado) {
+      return jsonResponse(res, 400, { error: 'Conecte-se ao Omie primeiro.' });
+    }
+    if (q.length < 2) {
+      return jsonResponse(res, 400, { error: 'Minimo 2 caracteres.' });
+    }
+
+    try {
+      const todos = await obterProdutosCache();
+      const filtrados = todos.filter(p => {
+        const cod = String(p.codigo || p.codigo_produto || '').toLowerCase();
+        const desc = String(p.descricao || '').toLowerCase();
+        return cod.includes(q) || desc.includes(q);
+      });
+
+      // Retorna campos brutos sem mapear, primeiros 10
+      const resultado = filtrados.slice(0, 10).map(p => ({
+        codigo: p.codigo || null,
+        codigo_produto: p.codigo_produto || null,
+        codigo_produto_integracao: p.codigo_produto_integracao || null,
+        descricao: p.descricao || null,
+        tipoItem: p.tipoItem || null,
+        codigo_familia: p.codigo_familia || null,
+        descricao_familia: p.descricao_familia || null,
+        caracteristicas: p.caracteristicas || null,
+        inativo: p.inativo || null,
+        bloqueado: p.bloqueado || null
+      }));
+
+      log('DOMU', `debug-campos: ${resultado.length} produtos brutos retornados`);
+      return jsonResponse(res, 200, { total: filtrados.length, campos: resultado });
+    } catch (e) {
+      return erroOmie(res, e);
+    }
+  }
+
+    // ==================== STATIC FILES ====================
 
   // Rota raiz → serve o HTML principal
   if (caminho === '/' || caminho === '/index.html') {
