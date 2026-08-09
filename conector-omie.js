@@ -28,6 +28,9 @@ let cacheProdutos = [];
 let cacheTimestamp = 0;
 let cacheCarregando = false;
 
+// Codigo do local de estoque DOMU (descoberto via ListarLocaisEstoque)
+let codigoEstoqueDomu = 0;
+
 
 // ============================================================
 // LOGGING
@@ -253,12 +256,112 @@ function data2AnosAtras() {
   return `${dd}/${mm}/${yyyy}`;
 }
 
+// Calcula data N anos atras no formato DD/MM/YYYY
+function dataNAnosAtras(n) {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - n);
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
 // Converte DD/MM/YYYY para Date para comparacao
 function parseDataBR(str) {
   if (!str) return new Date(0);
   const partes = str.split('/');
   if (partes.length !== 3) return new Date(0);
   return new Date(Number(partes[2]), Number(partes[1]) - 1, Number(partes[0]));
+}
+
+// ============================================================
+// DESCOBRIR LOCAL DE ESTOQUE DOMU
+// ============================================================
+// Chama ListarLocaisEstoque e busca o local com "DOMU" no codigo/descricao
+// Armazena o codigo_local_estoque para uso nas chamadas PosicaoEstoque
+// ============================================================
+async function descobrirEstoqueDomu() {
+  try {
+    log('OMIE', 'ListarLocaisEstoque — buscando local DOMU');
+    const resp = await chamarOmie('estoque/local/', 'ListarLocaisEstoque', {
+      nPagina: 1,
+      nRegPorPagina: 50
+    });
+
+    const locais = resp.locaisEncontrados || resp.locais || [];
+    const localDomu = locais.find(l => {
+      const codigo = String(l.codigo || l.cCodigo || '').toUpperCase();
+      const descricao = String(l.descricao || l.cDescricao || l.cDescrLocalEstoque || '').toUpperCase();
+      return codigo.includes('DOMU') || descricao.includes('DOMU');
+    });
+
+    if (localDomu) {
+      codigoEstoqueDomu = localDomu.codigo_local_estoque || localDomu.nCodLocalEstoque || 0;
+      log('OMIE', `Local de estoque DOMU encontrado: codigo_local_estoque=${codigoEstoqueDomu}`);
+    } else {
+      log('OMIE', 'AVISO: Local de estoque DOMU nao encontrado. Usando fallback codigo_local_estoque=0');
+      codigoEstoqueDomu = 0;
+    }
+  } catch (e) {
+    log('OMIE', `AVISO: ListarLocaisEstoque falhou: ${e.message}. Usando fallback codigo_local_estoque=0`);
+    codigoEstoqueDomu = 0;
+  }
+}
+
+
+// ============================================================
+// BUSCA PROGRESSIVA DE MOVIMENTOS DE COMPRA
+// ============================================================
+// Busca movimentos de compra (operacao 21/22) com janela progressiva:
+// 1 ano → 3 anos → 5 anos → 10 anos (máximo)
+// Só reporta "sem_ultima_compra" se nenhuma compra em 10 anos.
+// ============================================================
+async function buscarMovimentosCompra(idProd) {
+  const janelas = [1, 3, 5, 10]; // anos
+
+  for (const anos of janelas) {
+    const dtInicial = dataNAnosAtras(anos);
+    const dtFinal = dataHoje();
+    log('OMIE', `ListarMovimentoEstoque idProd=${idProd} janela=${anos} ano(s) [${dtInicial} a ${dtFinal}]`);
+
+    try {
+      const movResp = await chamarOmie('estoque/consulta/', 'ListarMovimentoEstoque', {
+        idProd: Number(idProd),
+        dDtInicial: dtInicial,
+        dDtFinal: dtFinal,
+        nPagina: 1,
+        nRegPorPagina: 500
+      });
+
+      const movimentos = movResp.movimentos || [];
+      // Filtra: operacao 21 ou 22, exclui cancelamento=S
+      const compras = movimentos.filter(m =>
+        (m.operacao === '21' || m.operacao === '22') &&
+        m.cancelamento !== 'S'
+      );
+
+      if (compras.length > 0) {
+        // Ordena por dtEmissao desc (mais recente primeiro)
+        compras.sort((a, b) => {
+          const dA = parseDataBR(a.dtEmissao);
+          const dB = parseDataBR(b.dtEmissao);
+          return dB.getTime() - dA.getTime();
+        });
+
+        const movimentoCompra = compras[0];
+        log('OMIE', `Movimento compra encontrado na janela de ${anos} ano(s): idMov=${movimentoCompra.idMov} dtEmissao=${movimentoCompra.dtEmissao} numDoc=${movimentoCompra.numDoc}`);
+        return movimentoCompra;
+      }
+
+      log('OMIE', `Nenhum movimento de compra em ${anos} ano(s), expandindo busca...`);
+    } catch (e) {
+      // Se a API retornar erro (ex: periodo sem dados), continua para próxima janela
+      log('OMIE', `ListarMovimentoEstoque falhou para janela ${anos} ano(s): ${e.message}`);
+    }
+  }
+
+  log('OMIE', 'Nenhum movimento de compra encontrado em 10 anos (maximo)');
+  return null;
 }
 
 
@@ -316,40 +419,12 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
     descricaoProdutoNfe: ''
   };
 
-  // --- PASSO 2: ListarMovimentoEstoque ---
+  // --- PASSO 2: Busca progressiva de movimentos de compra ---
   let movimentoCompra = null;
   try {
-    log('OMIE', `ListarMovimentoEstoque idProd=${idProd} ultimos 2 anos`);
-    const movResp = await chamarOmie('estoque/consulta/', 'ListarMovimentoEstoque', {
-      idProd: Number(idProd),
-      dDtInicial: data2AnosAtras(),
-      dDtFinal: dataHoje(),
-      nPagina: 1,
-      nRegPorPagina: 500
-    });
-
-    const movimentos = movResp.movimentos || [];
-    // Filtra: operacao 21 ou 22, exclui cancelamento=S
-    const compras = movimentos.filter(m =>
-      (m.operacao === '21' || m.operacao === '22') &&
-      m.cancelamento !== 'S'
-    );
-
-    // Ordena por dtEmissao desc (mais recente primeiro)
-    compras.sort((a, b) => {
-      const dA = parseDataBR(a.dtEmissao);
-      const dB = parseDataBR(b.dtEmissao);
-      return dB.getTime() - dA.getTime();
-    });
-
-    if (compras.length > 0) {
-      movimentoCompra = compras[0];
-      log('OMIE', `Movimento compra encontrado: idMov=${movimentoCompra.idMov} dtEmissao=${movimentoCompra.dtEmissao} numDoc=${movimentoCompra.numDoc}`);
-    } else {
-      log('OMIE', 'Nenhum movimento de compra encontrado');
-    }
+    movimentoCompra = await buscarMovimentosCompra(idProd);
   } catch (e) {
-    log('OMIE', `ListarMovimentoEstoque falhou: ${e.message}`);
+    log('OMIE', `Busca de movimentos de compra falhou: ${e.message}`);
   }
 
 
@@ -357,9 +432,12 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
   let notaEncontrada = false;
   if (movimentoCompra && movimentoCompra.idDoc) {
     try {
-      log('OMIE', `ConsultarNotaEnt nIdNota=${movimentoCompra.idDoc}`);
+      // Omie API: ConsultarNotaEnt usa nCodNotaEnt
+      // O campo idDoc do movimento de estoque corresponde ao nCodNotaEnt da Nota de Entrada
+      // Documentação: POST /api/v1/produtos/notaentrada/ → ConsultarNotaEnt
+      log('OMIE', `ConsultarNotaEnt nCodNotaEnt=${movimentoCompra.idDoc}`);
       const notaResp = await chamarOmie('produtos/notaentrada/', 'ConsultarNotaEnt', {
-        nIdNota: movimentoCompra.idDoc
+        nCodNotaEnt: movimentoCompra.idDoc
       });
 
       const cabec = notaResp.cabec || {};
@@ -385,18 +463,22 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
         resultado.tributosOrigem = 'nota_entrada';
         resultado.fiscalCompraCompleto = true;
 
-        // Extrai tributos
-        if (itemNota.ICMS) {
-          resultado.icms = itemNota.ICMS.nAliqICMS != null ? itemNota.ICMS.nAliqICMS : null;
-        }
-        if (itemNota.IPI) {
-          resultado.ipi = itemNota.IPI.nAliqIPI != null ? itemNota.IPI.nAliqIPI : null;
-        }
-        if (itemNota.PIS || itemNota.COFINS) {
-          const pis = (itemNota.PIS && itemNota.PIS.nAliqPIS != null) ? itemNota.PIS.nAliqPIS : 0;
-          const cofins = (itemNota.COFINS && itemNota.COFINS.nAliqCOFINS != null) ? itemNota.COFINS.nAliqCOFINS : 0;
-          resultado.pisCofins = pis + cofins;
-        }
+        // Extrai tributos — campos oficiais da API Omie
+        // Aliquotas e valores separados
+        resultado.icmsAliquota = itemNota.ICMS?.nAliq ?? null;
+        resultado.icmsValor = itemNota.ICMS?.nValor ?? null;
+        resultado.ipiAliquota = itemNota.IPI?.nAliqIPI ?? null;
+        resultado.ipiValor = itemNota.IPI?.nValorIPI ?? null;
+        resultado.pisAliquota = itemNota.PIS?.nAliqPIS ?? null;
+        resultado.pisValor = itemNota.PIS?.nValorPIS ?? null;
+        resultado.cofinsAliquota = itemNota.COFINS?.nAliqCOFINS ?? null;
+        resultado.cofinsValor = itemNota.COFINS?.nValorCOFINS ?? null;
+        // Combined for backward compatibility with frontend
+        resultado.icms = resultado.icmsAliquota;
+        resultado.ipi = resultado.ipiAliquota;
+        resultado.pis = resultado.pisAliquota;
+        resultado.cofins = resultado.cofinsAliquota;
+        resultado.pisCofins = ((resultado.pisAliquota || 0) + (resultado.cofinsAliquota || 0)) || null;
 
         // Tratamento fiscal (custos)
         if (itemNota.custos) {
@@ -467,10 +549,11 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
 
   // --- PASSO 5: PosicaoEstoque ---
   try {
-    log('OMIE', `PosicaoEstoque nCodProd=${idProd}`);
+    log('OMIE', `PosicaoEstoque id_prod=${idProd} codigo_local_estoque=${codigoEstoqueDomu}`);
     const estResp = await chamarOmie('estoque/consulta/', 'PosicaoEstoque', {
-      nCodProd: Number(idProd),
-      codigo_local_estoque: 0
+      id_prod: Number(idProd),
+      codigo_local_estoque: codigoEstoqueDomu,
+      data: dataHoje()
     });
 
     if (estResp) {
@@ -541,6 +624,9 @@ async function handler(req, res) {
       // Limpa cache ao reconectar com novas credenciais
       cacheProdutos = [];
       cacheTimestamp = 0;
+
+      // Descobre o local de estoque DOMU
+      await descobrirEstoqueDomu();
 
       const p = (r.produto_servico_cadastro || [])[0] || {};
       const resultado = {
@@ -778,5 +864,5 @@ server.listen(PORTA, () => {
 
 // Export para testes
 if (typeof module !== 'undefined') {
-  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, buscarUltimaCompra, PORTA };
+  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, descobrirEstoqueDomu, PORTA };
 }

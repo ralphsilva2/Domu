@@ -91,8 +91,8 @@ const FIXTURE_NOTA_ENTRADA = {
     cNomeFornecedor: "Distribuidora ABC Ltda"
   },
   produtos: [
-    {nCodProd: 201, cCodigo: "ACR-200", cDescricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", nQtde: 10, nValUnit: 146.36, cNCM: "3926.90.90", ICMS: {nAliqICMS: 12, nValorICMS: 175.63}, IPI: {nAliqIPI: 0, nValorIPI: 0}, PIS: {nAliqPIS: 1.65, nValorPIS: 24.15}, COFINS: {nAliqCOFINS: 7.60, nValorCOFINS: 111.23}, custos: {cICMSCusto: "S", cIPICusto: "N", cPISCusto: "N", cCOFINSCusto: "N", cFreteCusto: "N"}},
-    {nCodProd: 301, cCodigo: "MDF-060", cDescricao: "CHAPA MDF CRU 6,00 MM", nQtde: 20, nValUnit: 89.90, cNCM: "4411.12.10", ICMS: {nAliqICMS: 12}, IPI: {nAliqIPI: 3.25}, PIS: {nAliqPIS: 1.65}, COFINS: {nAliqCOFINS: 7.60}, custos: {}}
+    {nCodProd: 201, cCodigo: "ACR-200", cDescricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", nQtde: 10, nValUnit: 146.36, cNCM: "3926.90.90", ICMS: {nAliq: 12, nValor: 175.63}, IPI: {nAliqIPI: 0, nValorIPI: 0}, PIS: {nAliqPIS: 1.65, nValorPIS: 24.15}, COFINS: {nAliqCOFINS: 7.60, nValorCOFINS: 111.23}, custos: {cICMSCusto: "S", cIPICusto: "N", cPISCusto: "N", cCOFINSCusto: "N", cFreteCusto: "N"}},
+    {nCodProd: 301, cCodigo: "MDF-060", cDescricao: "CHAPA MDF CRU 6,00 MM", nQtde: 20, nValUnit: 89.90, cNCM: "4411.12.10", ICMS: {nAliq: 12}, IPI: {nAliqIPI: 3.25}, PIS: {nAliqPIS: 1.65}, COFINS: {nAliqCOFINS: 7.60}, custos: {}}
   ]
 };
 
@@ -150,7 +150,7 @@ const FIXTURE_NOTA_ENTRADA_8500 = {
     cNomeFornecedor: "Outra Distribuidora Ltda"
   },
   produtos: [
-    {nCodProd: 201, cCodigo: "ACR-200", cDescricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", nQtde: 5, nValUnit: 144.00, cNCM: "3926.90.90", ICMS: {nAliqICMS: 12, nValorICMS: 86.40}, IPI: {nAliqIPI: 0, nValorIPI: 0}, PIS: {nAliqPIS: 1.65, nValorPIS: 11.88}, COFINS: {nAliqCOFINS: 7.60, nValorCOFINS: 54.72}, custos: {cICMSCusto: "S", cIPICusto: "N", cPISCusto: "N", cCOFINSCusto: "N"}}
+    {nCodProd: 201, cCodigo: "ACR-200", cDescricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", nQtde: 5, nValUnit: 144.00, cNCM: "3926.90.90", ICMS: {nAliq: 12, nValor: 86.40}, IPI: {nAliqIPI: 0, nValorIPI: 0}, PIS: {nAliqPIS: 1.65, nValorPIS: 11.88}, COFINS: {nAliqCOFINS: 7.60, nValorCOFINS: 54.72}, custos: {cICMSCusto: "S", cIPICusto: "N", cPISCusto: "N", cCOFINSCusto: "N"}}
   ]
 };
 
@@ -362,6 +362,11 @@ async function executarTestes() {
       total_de_registros: 1,
       pagina: 1,
       registros_por_pagina: 1
+    }, {
+      // ListarLocaisEstoque response for descobrirEstoqueDomu()
+      locaisEncontrados: [
+        {codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU PRINCIPAL"}
+      ]
     });
 
     const r = await requisicaoLocal('POST', '/api/omie/test', {
@@ -591,6 +596,8 @@ async function executarTestes() {
     total_de_registros: 1,
     pagina: 1,
     registros_por_pagina: 1
+  }, {
+    locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU PRINCIPAL"}]
   });
   await requisicaoLocal('POST', '/api/omie/test', {
     appKey: '1234567890',
@@ -638,6 +645,8 @@ async function executarTestes() {
     setMockResponses({
       produto_servico_cadastro: [FIXTURE_CONSULTAR_PRODUTO],
       total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU PRINCIPAL"}]
     });
     await requisicaoLocal('POST', '/api/omie/test', {
       appKey: '1234567890', appSecret: 'segredo-secreto-123'
@@ -680,6 +689,8 @@ async function executarTestes() {
     setMockResponses({
       produto_servico_cadastro: [FIXTURE_CONSULTAR_PRODUTO],
       total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU PRINCIPAL"}]
     });
     await requisicaoLocal('POST', '/api/omie/test', {
       appKey: '9999888877',
@@ -747,6 +758,8 @@ async function executarTestes() {
   setMockResponses({
     produto_servico_cadastro: [FIXTURE_CONSULTAR_PRODUTO],
     total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+  }, {
+    locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU PRINCIPAL"}]
   });
   await requisicaoLocal('POST', '/api/omie/test', {
     appKey: '1234567890', appSecret: 'segredo-secreto-123'
@@ -914,6 +927,95 @@ async function executarTestes() {
     assert.strictEqual(r.body.compra.custoUnitario, 146.36);
     // Sao diferentes — CMC e media, custoUnitario e ultima compra real
     assert.notStrictEqual(r.body.compra.cmc, r.body.compra.custoUnitario);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 25. ConsultarNotaEnt usa nCodNotaEnt (nao nIdNota)
+  // ----------------------------------------------------------
+  await teste('ConsultarNotaEnt usa nCodNotaEnt (nao nIdNota)', async () => {
+    mockCalls = [];
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+
+    const notaCall = mockCalls.find(c => c.parsed && c.parsed.call === 'ConsultarNotaEnt');
+    assert(notaCall, 'Deve ter chamado ConsultarNotaEnt');
+    const param = notaCall.parsed.param[0];
+    assert(param.nCodNotaEnt !== undefined, 'Deve usar nCodNotaEnt');
+    assert(param.nIdNota === undefined, 'NAO deve usar nIdNota');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 26. PosicaoEstoque usa id_prod e data (nao nCodProd)
+  // ----------------------------------------------------------
+  await teste('PosicaoEstoque usa id_prod e data (nao nCodProd)', async () => {
+    mockCalls = [];
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+
+    const estoqueCall = mockCalls.find(c => c.parsed && c.parsed.call === 'PosicaoEstoque');
+    assert(estoqueCall, 'Deve ter chamado PosicaoEstoque');
+    const param = estoqueCall.parsed.param[0];
+    assert(param.id_prod !== undefined, 'Deve usar id_prod');
+    assert(param.data !== undefined, 'Deve enviar campo data');
+    assert(param.nCodProd === undefined, 'NAO deve usar nCodProd');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 27. Busca historica progressiva - encontra compra antiga
+  // ----------------------------------------------------------
+  await teste('Busca historica progressiva - encontra compra antiga (3 anos)', async () => {
+    let chamadaMovimento = 0;
+    mockCalls = [];
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') {
+        chamadaMovimento++;
+        // Primeira chamada (1 ano): retorna vazio
+        if (chamadaMovimento === 1) {
+          return FIXTURE_MOVIMENTO_VAZIO;
+        }
+        // Segunda chamada (3 anos): retorna compra encontrada
+        return FIXTURE_MOVIMENTO_ESTOQUE;
+      }
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    // Deve ter encontrado a compra na segunda tentativa (3 anos)
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.custoUnitario, 146.36);
+    // Deve ter feito pelo menos 2 chamadas de ListarMovimentoEstoque
+    const movCalls = mockCalls.filter(c => c.parsed && c.parsed.call === 'ListarMovimentoEstoque');
+    assert(movCalls.length >= 2, `Esperado >= 2 chamadas ListarMovimentoEstoque, recebeu ${movCalls.length}`);
   });
 
   await pausa();
