@@ -194,7 +194,14 @@ let mockCalls = [];
 let mockUpstreamAtual = 0;
 let mockUpstreamMaximo = 0;
 let concorrenciaMaximaMedida = 0;
+let maxChamadasListarRecebimentos = 0;
 const chamadasReaisOmie = 0;
+
+function contarChamadasListarRecebimentos() {
+  const total = mockCalls.filter(c => c.parsed?.call === 'ListarRecebimentos').length;
+  maxChamadasListarRecebimentos = Math.max(maxChamadasListarRecebimentos, total);
+  return total;
+}
 
 const originalRequest = https.request;
 
@@ -2227,6 +2234,7 @@ async function executarTestes() {
   // 66. Caso real: sem movimento, resolve por ListarRecebimentos
   // ----------------------------------------------------------
   await teste('Fallback ListarRecebimentos: caso 4084438/11835150482 retorna 25.50', async () => {
+    mockCalls = [];
     setMockRouter(parsed => {
       if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar: [], nTotPaginas: 1 };
       if (parsed.call === 'ListarRecebimentos') return fixtureListaRecebimentos();
@@ -2239,6 +2247,7 @@ async function executarTestes() {
     assert.strictEqual(r.body.compra.custoUnitario, 25.50);
     assert.strictEqual(r.body.compra.valorUnitarioNota, 25.50);
     assert.strictEqual(r.body.compra.criterioVinculo, 'recebimento_item_id_interno');
+    assert.strictEqual(contarChamadasListarRecebimentos(), 1);
   });
 
   await teste('Fallback aceita cNaoGerarMovEstoque=S', async () => {
@@ -2284,6 +2293,83 @@ async function executarTestes() {
     assert.strictEqual(r.body.compra.custoUnitario, 25.50);
     const paginas = mockCalls.filter(c => c.parsed?.call === 'ListarRecebimentos').map(c => c.parsed.param[0].nPagina);
     assert.deepStrictEqual(paginas.slice(0, 2), [1, 2]);
+    contarChamadasListarRecebimentos();
+  });
+
+  await teste('ListarRecebimentos encontra produto na pagina 3 com exatamente 3 chamadas', async () => {
+    mockCalls = [];
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar: [], nTotPaginas: 1 };
+      if (parsed.call === 'ListarRecebimentos') {
+        const pagina = parsed.param[0].nPagina;
+        return pagina < 3
+          ? fixtureListaRecebimentos({ pagina, totalPaginas: 3, recebimentos: [] })
+          : fixtureListaRecebimentos({ pagina: 3, totalPaginas: 3 });
+      }
+      if (parsed.call === 'PosicaoEstoque') return { saldo: 0, fisico: 0, cmc: 0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.body.compra.custoUnitario, 25.50);
+    assert.strictEqual(contarChamadasListarRecebimentos(), 3);
+  });
+
+  await teste('Compra em janela recente interrompe busca antes de janelas antigas', async () => {
+    mockCalls = [];
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar: [], nTotPaginas: 1 };
+      if (parsed.call === 'ListarRecebimentos') return fixtureListaRecebimentos({ totalPaginas: 20 });
+      if (parsed.call === 'PosicaoEstoque') return { saldo: 0, fisico: 0, cmc: 0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    const chamadas = mockCalls.filter(c => c.parsed?.call === 'ListarRecebimentos');
+    assert.strictEqual(chamadas.length, 1);
+    assert.strictEqual(chamadas[0].parsed.param[0].nPagina, 1);
+    contarChamadasListarRecebimentos();
+  });
+
+  await teste('Orcamento total limita 20 paginas e retorna OMIE_QUERY_BUDGET_EXCEEDED', async () => {
+    const conector = require('./conector-omie.js');
+    mockCalls = [];
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar: [], nTotPaginas: 1 };
+      if (parsed.call === 'ListarRecebimentos') return { recebimentos: [], nPagina: parsed.param[0].nPagina, nTotPaginas: 20 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status, 503);
+    assert.strictEqual(r.body.code, 'OMIE_QUERY_BUDGET_EXCEEDED');
+    assert.strictEqual(r.body.method, 'ListarRecebimentos');
+    assert.strictEqual(r.body.paginasConsultadas, conector.MAX_PAGINAS_RECEBIMENTOS_POR_BUSCA);
+    assert.strictEqual(r.body.limiteConfigurado, conector.MAX_PAGINAS_RECEBIMENTOS_POR_BUSCA);
+    assert(r.body.intervaloHistoricoConsultado.de);
+    assert(r.body.intervaloHistoricoConsultado.ate);
+    assert.strictEqual(r.body.compra, undefined);
+    assert.strictEqual(contarChamadasListarRecebimentos(), conector.MAX_PAGINAS_RECEBIMENTOS_POR_BUSCA);
+  });
+
+  await teste('Rate limit na pagina 2 interrompe e pagina 3 nao atinge upstream', async () => {
+    const conector = require('./conector-omie.js');
+    conector.circuitBreaker.clear();
+    mockCalls = [];
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar: [], nTotPaginas: 1 };
+      if (parsed.call === 'ListarRecebimentos') {
+        const pagina = parsed.param[0].nPagina;
+        if (pagina === 1) return { recebimentos: [], nPagina: 1, nTotPaginas: 20 };
+        return { faultstring: 'API bloqueada por consumo indevido. Tente novamente em 60 segundos.', faultcode: '0' };
+      }
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status, 429);
+    assert.strictEqual(r.body.code, 'OMIE_RATE_LIMIT');
+    const paginas = mockCalls.filter(c => c.parsed?.call === 'ListarRecebimentos').map(c => c.parsed.param[0].nPagina);
+    assert.deepStrictEqual(paginas, [1, 2]);
+    contarChamadasListarRecebimentos();
+    conector.circuitBreaker.clear();
   });
 
   await teste('Recebimentos cancelados devolvidos e ignorados nao vencem documento valido', async () => {
@@ -2431,6 +2517,7 @@ async function executarTestes() {
   console.log(`  RESULTADO: ${testesOk}/${testesTotal} testes passaram`);
   console.log(`  CONCORRENCIA MAXIMA MEDIDA: ${concorrenciaMaximaMedida}`);
   console.log(`  CHAMADAS REAIS OMIE: ${chamadasReaisOmie}`);
+  console.log(`  MAXIMO LISTARRECEBIMENTOS OBSERVADO: ${maxChamadasListarRecebimentos}`);
   if (testesFalha > 0) {
     console.log(`  FALHAS: ${testesFalha}`);
     resultados.filter(r => !r.ok).forEach(r => {

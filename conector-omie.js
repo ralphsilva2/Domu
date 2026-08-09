@@ -19,6 +19,7 @@ const CACHE_COMPRA_TTL_MS = 60 * 1000;
 const CACHE_ESTOQUE_TTL_MS = 30 * 1000;
 const MAX_RESULTADOS_BUSCA = 50;
 const REGISTROS_POR_PAGINA = 200;
+const MAX_PAGINAS_RECEBIMENTOS_POR_BUSCA = 12;
 
 // Estado da conexao
 let appKey = '';
@@ -416,6 +417,16 @@ function jsonResponse(res, code, obj) {
 }
 
 function erroOmie(res, err) {
+  if (err.code === 'OMIE_QUERY_BUDGET_EXCEEDED') {
+    return jsonResponse(res, 503, {
+      error: err.message,
+      code: err.code,
+      method: err.method,
+      paginasConsultadas: err.paginasConsultadas,
+      intervaloHistoricoConsultado: err.intervaloHistoricoConsultado,
+      limiteConfigurado: err.limiteConfigurado
+    });
+  }
   if (err.isRateLimit) {
     const retryAfterSeconds = err.rateLimitInfo?.retryAfterSeconds || 60;
     res.setHeader('Retry-After', String(retryAfterSeconds));
@@ -697,11 +708,27 @@ function localizarItemRecebimento(recebimento, idProd) {
 }
 
 async function buscarRecebimentoCompra(idProd, diagnostico = null) {
-  for (const janela of criarJanelasHistoricas()) {
+  const janelas = criarJanelasHistoricas();
+  let paginasConsultadas = 0;
+  const intervaloConsultado = { de: janelas[0].inicio, ate: janelas[0].fim };
+
+  function erroOrcamento(janela) {
+    intervaloConsultado.de = janela.inicio;
+    const err = new Error(`OMIE_QUERY_BUDGET_EXCEEDED: ListarRecebimentos atingiu o limite de ${MAX_PAGINAS_RECEBIMENTOS_POR_BUSCA} páginas.`);
+    err.code = 'OMIE_QUERY_BUDGET_EXCEEDED';
+    err.method = 'ListarRecebimentos';
+    err.paginasConsultadas = paginasConsultadas;
+    err.intervaloHistoricoConsultado = { ...intervaloConsultado };
+    err.limiteConfigurado = MAX_PAGINAS_RECEBIMENTOS_POR_BUSCA;
+    return err;
+  }
+
+  for (const janela of janelas) {
+    intervaloConsultado.de = janela.inicio;
     let pagina = 1;
     let totalPaginas = 1;
-    const recebimentos = [];
     do {
+      if (paginasConsultadas >= MAX_PAGINAS_RECEBIMENTOS_POR_BUSCA) throw erroOrcamento(janela);
       let resp;
       try {
         resp = await chamarOmieProtegido('produtos/recebimentonfe/', 'ListarRecebimentos', {
@@ -719,17 +746,23 @@ async function buscarRecebimentoCompra(idProd, diagnostico = null) {
           throw e;
         }
       }
-      recebimentos.push(...extrairRecebimentos(resp));
+      paginasConsultadas++;
       totalPaginas = extrairTotalPaginas(resp);
+      const candidatos = extrairRecebimentos(resp)
+        .map(recebimento => ({ recebimento, item: localizarItemRecebimento(recebimento, idProd) }))
+        .filter(c => c.item)
+        .sort((a, b) => parseDataBR(dataRecebimento(b.recebimento)) - parseDataBR(dataRecebimento(a.recebimento)));
+      if (diagnostico?.recebimentosConsultados) diagnostico.recebimentosConsultados.push({
+        inicio: janela.inicio,
+        fim: janela.fim,
+        pagina,
+        totalPaginas,
+        paginasConsultadas,
+        candidatos: candidatos.length
+      });
+      if (candidatos.length) return candidatos[0];
       pagina++;
     } while (pagina <= totalPaginas);
-
-    const candidatos = recebimentos
-      .map(recebimento => ({ recebimento, item: localizarItemRecebimento(recebimento, idProd) }))
-      .filter(c => c.item)
-      .sort((a, b) => parseDataBR(dataRecebimento(b.recebimento)) - parseDataBR(dataRecebimento(a.recebimento)));
-    if (diagnostico?.recebimentosConsultados) diagnostico.recebimentosConsultados.push({ inicio: janela.inicio, fim: janela.fim, paginas: totalPaginas, candidatos: candidatos.length });
-    if (candidatos.length) return candidatos[0];
   }
   return null;
 }
@@ -1420,5 +1453,5 @@ server.listen(PORTA, () => {
 
 // Export para testes
 if (typeof module !== 'undefined') {
-  module.exports = { server, handler, chamarOmie, chamarOmieProtegido, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, buscarRecebimentoCompra, descobrirEstoqueDomu, obterPosicaoEstoque, extrairMovimentos, extrairRecebimentos, extrairTotalPaginas, movimentoEhCompraValida, pontuarProduto, normalizarBusca, normalizarCodigoBusca, produtoPertenceCategoria, REGRAS_CATEGORIA_MATERIAL, criarJanelasHistoricas, circuitBreaker, registrarBloqueio, verificarBloqueio, parseRateLimit, compraEmAndamento, limparCachesOperacionais, limparCachesConsultas, PORTA };
+  module.exports = { server, handler, chamarOmie, chamarOmieProtegido, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, buscarRecebimentoCompra, descobrirEstoqueDomu, obterPosicaoEstoque, extrairMovimentos, extrairRecebimentos, extrairTotalPaginas, movimentoEhCompraValida, pontuarProduto, normalizarBusca, normalizarCodigoBusca, produtoPertenceCategoria, REGRAS_CATEGORIA_MATERIAL, criarJanelasHistoricas, circuitBreaker, registrarBloqueio, verificarBloqueio, parseRateLimit, compraEmAndamento, limparCachesOperacionais, limparCachesConsultas, MAX_PAGINAS_RECEBIMENTOS_POR_BUSCA, PORTA };
 }
