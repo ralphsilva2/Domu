@@ -100,6 +100,80 @@ function chamarOmie(endpoint, call, param) {
 // ============================================================
 // LER BODY DO REQUEST
 // ============================================================
+
+// ============================================================
+// CIRCUIT BREAKER — bloqueio por método Omie
+// ============================================================
+const circuitBreaker = new Map();
+
+function parseRateLimit(msg) {
+  const match = /Tente novamente em (\d+) segundos/i.exec(msg || '');
+  if (match) return parseInt(match[1], 10);
+  if (/bloqueada por consumo/i.test(msg || '')) return 60;
+  return 0;
+}
+
+function registrarBloqueio(call, segundos) {
+  circuitBreaker.set(call, { blockedUntil: Date.now() + segundos * 1000, retryAfterSeconds: segundos });
+  log('CIRCUIT', `${call} bloqueado por ${segundos}s`);
+}
+
+function verificarBloqueio(call) {
+  const info = circuitBreaker.get(call);
+  if (!info) return null;
+  if (Date.now() >= info.blockedUntil) { circuitBreaker.delete(call); return null; }
+  return { code: 'OMIE_RATE_LIMIT', method: call, retryAfterSeconds: Math.ceil((info.blockedUntil - Date.now()) / 1000), blockedUntil: info.blockedUntil };
+}
+
+// ============================================================
+// FILA DE CONCORRÊNCIA — máximo 3 chamadas simultâneas
+// ============================================================
+const MAX_CONCORRENCIA = 3;
+let emExecucao = 0;
+const filaEspera = [];
+
+function executarComFila(fn) {
+  return new Promise((resolve, reject) => {
+    const executar = () => {
+      emExecucao++;
+      fn().then(resolve).catch(reject).finally(() => {
+        emExecucao--;
+        if (filaEspera.length > 0) (filaEspera.shift())();
+      });
+    };
+    if (emExecucao < MAX_CONCORRENCIA) executar();
+    else filaEspera.push(executar);
+  });
+}
+
+// ============================================================
+// CHAMADA OMIE COM CIRCUIT BREAKER E FILA
+// ============================================================
+function chamarOmieProtegido(endpoint, call, param) {
+  const bloqueio = verificarBloqueio(call);
+  if (bloqueio) {
+    const err = new Error(`OMIE_RATE_LIMIT: ${call} bloqueado por mais ${bloqueio.retryAfterSeconds}s`);
+    err.isRateLimit = true;
+    err.rateLimitInfo = bloqueio;
+    return Promise.reject(err);
+  }
+  return executarComFila(() => chamarOmie(endpoint, call, param).catch(e => {
+    const segundos = parseRateLimit(e.message);
+    if (segundos > 0) {
+      registrarBloqueio(call, segundos);
+      e.isRateLimit = true;
+      e.rateLimitInfo = { code: 'OMIE_RATE_LIMIT', method: call, retryAfterSeconds: segundos, blockedUntil: Date.now() + segundos * 1000 };
+    }
+    throw e;
+  }));
+}
+
+// ============================================================
+// DEDUPLICAÇÃO — uma cadeia por produtoId
+// ============================================================
+const compraEmAndamento = new Map();
+
+
 function lerBody(req) {
   return new Promise((resolve, reject) => {
     let b = '';
@@ -136,7 +210,7 @@ async function carregarTodosProdutos() {
 
   do {
     log('OMIE', `ListarProdutos pagina=${pagina} registros=${REGISTROS_POR_PAGINA}`);
-    const r = await chamarOmie('geral/produtos/', 'ListarProdutos', {
+    const r = await chamarOmieProtegido('geral/produtos/', 'ListarProdutos', {
       pagina,
       registros_por_pagina: REGISTROS_POR_PAGINA,
       apenas_importado_api: 'N',
@@ -368,7 +442,7 @@ function parseDataBR(str) {
 async function descobrirEstoqueDomu() {
   try {
     log('OMIE', 'ListarLocaisEstoque — buscando local DOMU');
-    const resp = await chamarOmie('estoque/local/', 'ListarLocaisEstoque', {
+    const resp = await chamarOmieProtegido('estoque/local/', 'ListarLocaisEstoque', {
       nPagina: 1,
       nRegPorPagina: 50
     });
@@ -443,12 +517,13 @@ function movimentoEhCompraValida(m) {
 }
 
 async function buscarMovimentosCompra(idProd) {
-  const janelas = [2, 4, 6, 8, 10, 12]; // anos — janelas progressivas
+  // Janelas NÃO sobrepostas: 0-2, 2-4, 4-6, 6-8, 8-10, 10-12 anos
+  const janelas = [[0, 2], [2, 4], [4, 6], [6, 8], [8, 10], [10, 12]];
 
-  for (const anos of janelas) {
-    const dtInicial = dataNAnosAtras(anos);
-    const dtFinal = dataHoje();
-    log('OMIE', `ListarMovimentoEstoque idProd=${idProd} janela=${anos} ano(s) [${dtInicial} a ${dtFinal}]`);
+  for (const [anosInicio, anosFim] of janelas) {
+    const dtInicial = dataNAnosAtras(anosFim);
+    const dtFinal = anosInicio === 0 ? dataHoje() : dataNAnosAtras(anosInicio);
+    log('OMIE', `ListarMovimentoEstoque idProd=${idProd} janela=${anosInicio}-${anosFim} anos [${dtInicial} a ${dtFinal}]`);
 
     try {
       let todosMovimentos = [];
@@ -456,7 +531,7 @@ async function buscarMovimentosCompra(idProd) {
       let totalPaginas = 1;
 
       do {
-        const movResp = await chamarOmie('estoque/consulta/', 'ListarMovimentoEstoque', {
+        const movResp = await chamarOmieProtegido('estoque/consulta/', 'ListarMovimentoEstoque', {
           idProd: Number(idProd),
           dDtInicial: dtInicial,
           dDtFinal: dtFinal,
@@ -471,29 +546,25 @@ async function buscarMovimentosCompra(idProd) {
         pagina++;
       } while (pagina <= totalPaginas);
 
-      // Filtra compras válidas
       const compras = todosMovimentos.filter(movimentoEhCompraValida);
 
       if (compras.length > 0) {
-        // Ordena por data mais recente
-        compras.sort((a, b) => {
-          const dA = parseDataBR(obterDtMov(a));
-          const dB = parseDataBR(obterDtMov(b));
-          return dB.getTime() - dA.getTime();
-        });
-
+        compras.sort((a, b) => parseDataBR(obterDtMov(b)).getTime() - parseDataBR(obterDtMov(a)).getTime());
         const movimentoCompra = compras[0];
-        log('OMIE', `Movimento compra encontrado na janela de ${anos} ano(s): idMov=${obterIdMov(movimentoCompra)} dt=${obterDtMov(movimentoCompra)} numDoc=${movimentoCompra.numDoc || ''}`);
+        log('OMIE', `Movimento compra encontrado janela ${anosInicio}-${anosFim} anos: idMov=${obterIdMov(movimentoCompra)} dt=${obterDtMov(movimentoCompra)}`);
         return movimentoCompra;
       }
 
-      log('OMIE', `Nenhum movimento de compra em ${anos} ano(s), expandindo busca...`);
+      log('OMIE', `Nenhuma compra na janela ${anosInicio}-${anosFim} anos, avancando...`);
     } catch (e) {
-      log('OMIE', `ListarMovimentoEstoque falhou para janela ${anos} ano(s): ${e.message}`);
+      // Rate limit ou erro técnico: PARAR imediatamente, NÃO continuar janelas
+      if (e.isRateLimit) throw e;
+      log('OMIE', `ListarMovimentoEstoque falhou janela ${anosInicio}-${anosFim}: ${e.message}`);
+      throw e; // Erro técnico NÃO significa janela vazia
     }
   }
 
-  log('OMIE', 'Nenhum movimento de compra encontrado em 12 anos (maximo)');
+  log('OMIE', 'Nenhum movimento de compra encontrado em 12 anos');
   return null;
 }
 
@@ -557,7 +628,9 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
   try {
     movimentoCompra = await buscarMovimentosCompra(idProd);
   } catch (e) {
+    if (e.isRateLimit) throw e; // Propagar rate limit — NÃO mascarar
     log('OMIE', `Busca de movimentos de compra falhou: ${e.message}`);
+    throw e; // Erro técnico NÃO é "nao_encontrado"
   }
 
   // --- PASSO 3: ConsultarNotaEnt (se movimento com idDoc) ---
@@ -565,7 +638,7 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
   if (movimentoCompra && idDocumento) {
     try {
       log('OMIE', `ConsultarNotaEnt nCodNotaEnt=${idDocumento}`);
-      const notaResp = await chamarOmie('produtos/notaentrada/', 'ConsultarNotaEnt', {
+      const notaResp = await chamarOmieProtegido('produtos/notaentrada/', 'ConsultarNotaEnt', {
         nCodNotaEnt: idDocumento
       });
 
@@ -650,7 +723,7 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
   if (movimentoCompra && movimentoCompra.idRecebimento) {
     try {
       log('OMIE', `ConsultarRecebimento nIdReceb=${movimentoCompra.idRecebimento}`);
-      const recResp = await chamarOmie('produtos/recebimentonfe/', 'ConsultarRecebimento', {
+      const recResp = await chamarOmieProtegido('produtos/recebimentonfe/', 'ConsultarRecebimento', {
         nIdReceb: movimentoCompra.idRecebimento
       });
       if (recResp) {
@@ -666,7 +739,7 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
   if (codigoEstoqueDomu !== null) {
     try {
       log('OMIE', `PosicaoEstoque id_prod=${idProd} codigo_local_estoque=${codigoEstoqueDomu}`);
-      const estResp = await chamarOmie('estoque/consulta/', 'PosicaoEstoque', {
+      const estResp = await chamarOmieProtegido('estoque/consulta/', 'PosicaoEstoque', {
         id_prod: Number(idProd),
         codigo_local_estoque: codigoEstoqueDomu,
         data: dataHoje()
@@ -844,7 +917,7 @@ async function handler(req, res) {
             const idProd = p.codigo_produto || p.codigo_produto_integracao;
             if (!idProd) return null;
             try {
-              const est = await chamarOmie('estoque/consulta/', 'PosicaoEstoque', {
+              const est = await chamarOmieProtegido('estoque/consulta/', 'PosicaoEstoque', {
                 id_prod: Number(idProd),
                 codigo_local_estoque: codigoEstoqueDomu,
                 data: dataHoje()
@@ -915,11 +988,39 @@ async function handler(req, res) {
       let produto = null;
       let idProd = null;
 
-      // --- PASSO 1: ConsultarProduto ---
-      if (codigo) {
+      // --- PASSO 1: Identificar produto SEM chamada desnecessária ---
+      // Se ID está disponível, usar diretamente. Buscar dados no cache.
+      if (id) {
+        idProd = id;
+        // Tentar encontrar no cache do catálogo (evita ConsultarProduto)
+        if (cacheProdutos.length > 0) {
+          const cached = cacheProdutos.find(p =>
+            String(p.codigo_produto) === String(id) || String(p.codigo) === String(codigo)
+          );
+          if (cached) produto = mapProduto(cached);
+        }
+        // Se não encontrou no cache, buscar via API (necessário para r.body.produto)
+        if (!produto) {
+          try {
+            const r2 = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo_produto: id });
+            if (r2 && r2.codigo_produto) { produto = mapProduto(r2); idProd = r2.codigo_produto; }
+          } catch (e) {
+            // Se codigo disponível, tentar por codigo
+            if (codigo) {
+              try {
+                const r3 = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
+                if (r3 && r3.codigo_produto) { produto = mapProduto(r3); idProd = r3.codigo_produto; }
+              } catch (e2) { log('DOMU', `ConsultarProduto falhou: ${e2.message}`); }
+            }
+          }
+        }
+      }
+
+      // Só chama ConsultarProduto se NÃO temos idProd e temos apenas codigo
+      if (!idProd && codigo) {
         try {
           log('OMIE', `ConsultarProduto codigo_produto="${codigo}"`);
-          const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
+          const r = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
           if (r && r.codigo_produto) {
             produto = mapProduto(r);
             idProd = r.codigo_produto;
@@ -929,27 +1030,25 @@ async function handler(req, res) {
         }
       }
 
-      if (!produto && id) {
-        try {
-          log('OMIE', `ConsultarProduto codigo_produto_integracao="${id}"`);
-          const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto_integracao: id });
-          if (r && r.codigo_produto) {
-            produto = mapProduto(r);
-            idProd = r.codigo_produto;
-          }
-        } catch (e) {
-          log('DOMU', `ConsultarProduto por id falhou: ${e.message}`);
-        }
-      }
-
-      // Use id parameter as fallback for idProd
+      // Fallback
       if (!idProd && id) idProd = id;
 
-      // --- PASSOS 2-5: buscarUltimaCompra ---
+      // --- PASSOS 2-5: buscarUltimaCompra com deduplicação ---
       let compra;
       if (idProd) {
-        compra = await buscarUltimaCompra(idProd, produto ? produto.codigo : codigo);
-        // Set descricaoProdutoNfe from product if not set by nota
+        // Deduplicação: se já existe uma busca em andamento para este produto, reutilizar
+        const chaveDedup = String(idProd);
+        if (compraEmAndamento.has(chaveDedup)) {
+          compra = await compraEmAndamento.get(chaveDedup);
+        } else {
+          const promessa = buscarUltimaCompra(idProd, produto ? produto.codigo : codigo);
+          compraEmAndamento.set(chaveDedup, promessa);
+          try {
+            compra = await promessa;
+          } finally {
+            compraEmAndamento.delete(chaveDedup);
+          }
+        }
         if (!compra.descricaoProdutoNfe && produto) {
           compra.descricaoProdutoNfe = produto.descricao;
         }
@@ -1064,13 +1163,13 @@ async function handler(req, res) {
       let idProd = null;
       if (codigo) {
         try {
-          const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
+          const r = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
           if (r && r.codigo_produto) { idProd = r.codigo_produto; diag.etapas.push({ etapa: 'ConsultarProduto', ok: true, codigo_produto: r.codigo_produto }); }
         } catch (e) { diag.etapas.push({ etapa: 'ConsultarProduto(codigo)', erro: e.message }); }
       }
       if (!idProd && id) {
         try {
-          const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto_integracao: id });
+          const r = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo_produto_integracao: id });
           if (r && r.codigo_produto) { idProd = r.codigo_produto; diag.etapas.push({ etapa: 'ConsultarProduto(integracao)', ok: true, codigo_produto: r.codigo_produto }); }
         } catch (e) { diag.etapas.push({ etapa: 'ConsultarProduto(integracao)', erro: e.message }); }
       }
@@ -1091,7 +1190,7 @@ async function handler(req, res) {
 
       do {
         try {
-          const movResp = await chamarOmie('estoque/consulta/', 'ListarMovimentoEstoque', {
+          const movResp = await chamarOmieProtegido('estoque/consulta/', 'ListarMovimentoEstoque', {
             idProd: Number(idProd),
             dDtInicial: dtInicial,
             dDtFinal: dtFinal,
@@ -1161,7 +1260,7 @@ async function handler(req, res) {
       const idDocumento = obterIdDoc(melhor);
       if (idDocumento) {
         try {
-          const notaResp = await chamarOmie('produtos/notaentrada/', 'ConsultarNotaEnt', { nCodNotaEnt: idDocumento });
+          const notaResp = await chamarOmieProtegido('produtos/notaentrada/', 'ConsultarNotaEnt', { nCodNotaEnt: idDocumento });
           const cabec = notaResp.cabec || {};
           const itens = notaResp.produtos || notaResp.itens || notaResp.produto_servico || [];
           diag.consultaNota = {
@@ -1249,5 +1348,5 @@ server.listen(PORTA, () => {
 
 // Export para testes
 if (typeof module !== 'undefined') {
-  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, descobrirEstoqueDomu, extrairMovimentos, extrairTotalPaginas, movimentoEhCompraValida, pontuarProduto, normalizarBusca, normalizarCodigoBusca, produtoPertenceCategoria, REGRAS_CATEGORIA_MATERIAL, PORTA };
+  module.exports = { server, handler, chamarOmie, chamarOmieProtegido, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, descobrirEstoqueDomu, extrairMovimentos, extrairTotalPaginas, movimentoEhCompraValida, pontuarProduto, normalizarBusca, normalizarCodigoBusca, produtoPertenceCategoria, REGRAS_CATEGORIA_MATERIAL, circuitBreaker, registrarBloqueio, verificarBloqueio, parseRateLimit, compraEmAndamento, PORTA };
 }
