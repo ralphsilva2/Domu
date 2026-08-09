@@ -1635,6 +1635,192 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
+  // 46. Categoria chapa-petg: filtra PETG corretamente
+  // ----------------------------------------------------------
+  await teste('Categoria chapa-petg: filtra por regra PETG', async () => {
+    setMockResponses({ produto_servico_cadastro: [{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}], total_de_paginas:1,total_de_registros:1,pagina:1,registros_por_pagina:1 }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
+    await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
+    await pausa();
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarProdutos') return { produto_servico_cadastro: [
+        {codigo_produto:"P1",codigo:"PETG-2",descricao:"CHAPA PETG CRISTAL 2MM",unidade:"CH",inativo:"N"},
+        {codigo_produto:"P2",codigo:"PETG-3",descricao:"CHAPA PETG BRANCO 3MM",unidade:"CH",inativo:"N"},
+        {codigo_produto:"P3",codigo:"PETG-5",descricao:"CHAPA PETG FUME 5MM",unidade:"CH",inativo:"N"},
+        {codigo_produto:"X1",codigo:"ACR-2",descricao:"CHAPA ACRILICO 2MM",unidade:"CH",inativo:"N"}
+      ], total_de_paginas:1 };
+      if (parsed.call === 'PosicaoEstoque') return {saldo:10,fisico:10,cmc:50,reservado:0};
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/materiais?categoria=chapa-petg');
+    assert.strictEqual(r.status,200);
+    assert.strictEqual(r.body.produtos.length,3);
+    assert(r.body.produtos.every(p => p.codigo.startsWith('PETG')));
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 47. Categoria chapa-aco: filtra aço/inox corretamente
+  // ----------------------------------------------------------
+  await teste('Categoria chapa-aco: filtra por regra aco/inox', async () => {
+    setMockResponses({ produto_servico_cadastro: [{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}], total_de_paginas:1,total_de_registros:1,pagina:1,registros_por_pagina:1 }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
+    await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
+    await pausa();
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarProdutos') return { produto_servico_cadastro: [
+        {codigo_produto:"A1",codigo:"ACO-08",descricao:"CHAPA ACO 1020 0,8MM",unidade:"CH",inativo:"N"},
+        {codigo_produto:"A2",codigo:"INOX-15",descricao:"CHAPA INOX 304 1,5MM",unidade:"CH",inativo:"N"},
+        {codigo_produto:"A3",codigo:"ACO-20",descricao:"CHAPA ACO GALV 2,0MM",unidade:"CH",inativo:"N"},
+        {codigo_produto:"X1",codigo:"MDF-6",descricao:"CHAPA MDF 6MM",unidade:"CH",inativo:"N"}
+      ], total_de_paginas:1 };
+      if (parsed.call === 'PosicaoEstoque') return {saldo:5,fisico:5,cmc:100,reservado:0};
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/materiais?categoria=chapa-aco');
+    assert.strictEqual(r.status,200);
+    assert.strictEqual(r.body.produtos.length,3);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 48. Categoria tubo-redondo: filtra tubos redondos
+  // ----------------------------------------------------------
+  await teste('Categoria tubo-redondo: filtra tubos redondos', async () => {
+    setMockResponses({ produto_servico_cadastro: [{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}], total_de_paginas:1,total_de_registros:1,pagina:1,registros_por_pagina:1 }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
+    await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
+    await pausa();
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarProdutos') return { produto_servico_cadastro: [
+        {codigo_produto:"T1",codigo:"TR-25",descricao:"TUBO REDONDO ACO 25MM",unidade:"UN",inativo:"N"},
+        {codigo_produto:"T2",codigo:"TR-32",descricao:"TUBO REDONDO ACO 32MM",unidade:"UN",inativo:"N"},
+        {codigo_produto:"T3",codigo:"TR-50",descricao:"TUBO REDONDO INOX 50MM",unidade:"UN",inativo:"N"},
+        {codigo_produto:"TQ",codigo:"TQ-20",descricao:"TUBO QUADRADO 20X20",unidade:"UN",inativo:"N"}
+      ], total_de_paginas:1 };
+      if (parsed.call === 'PosicaoEstoque') return {saldo:20,fisico:20,cmc:30,reservado:0};
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/materiais?categoria=tubo-redondo');
+    assert.strictEqual(r.status,200);
+    assert.strictEqual(r.body.produtos.length,3);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 49. Categoria arame: filtra arames
+  // ----------------------------------------------------------
+  await teste('Categoria arame: filtra arames', async () => {
+    setMockResponses({ produto_servico_cadastro: [{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}], total_de_paginas:1,total_de_registros:1,pagina:1,registros_por_pagina:1 }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
+    await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
+    await pausa();
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarProdutos') return { produto_servico_cadastro: [
+        {codigo_produto:"AR1",codigo:"ARAME-3",descricao:"ARAME GALVANIZADO 3MM",unidade:"KG",inativo:"N"},
+        {codigo_produto:"AR2",codigo:"ARAME-4",descricao:"ARAME RECOZIDO 4MM",unidade:"KG",inativo:"N"},
+        {codigo_produto:"AR3",codigo:"ARAME-6",descricao:"ARAME INOX 6MM",unidade:"KG",inativo:"N"},
+        {codigo_produto:"X1",codigo:"PSAI-1",descricao:"CHAPA PSAI 1MM",unidade:"CH",inativo:"N"}
+      ], total_de_paginas:1 };
+      if (parsed.call === 'PosicaoEstoque') return {saldo:100,fisico:100,cmc:15,reservado:0};
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/materiais?categoria=arame');
+    assert.strictEqual(r.status,200);
+    assert.strictEqual(r.body.produtos.length,3);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 50. Materiais: NÃO limita a 50 — retorna todos os candidatos
+  // ----------------------------------------------------------
+  await teste('Materiais: retorna 75 produtos sem limitar a 50', async () => {
+    setMockResponses({ produto_servico_cadastro: [{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}], total_de_paginas:1,total_de_registros:1,pagina:1,registros_por_pagina:1 }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
+    await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
+    await pausa();
+    const muitos = [];
+    for (let i = 0; i < 75; i++) muitos.push({codigo_produto:String(2000+i),codigo:`MDF-${String(i).padStart(3,'0')}`,descricao:`CHAPA MDF TIPO ${i}`,unidade:"CH",inativo:"N"});
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarProdutos') return { produto_servico_cadastro: muitos, total_de_paginas:1 };
+      if (parsed.call === 'PosicaoEstoque') return {saldo:5,fisico:5,cmc:90,reservado:0};
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/materiais?categoria=chapa-mdf');
+    assert.strictEqual(r.status,200);
+    assert.strictEqual(r.body.produtos.length,75,'Deve retornar TODOS os 75, nao limitar a 50');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 51. End-to-end: /produto-compra com produto real 11835150482
+  // ----------------------------------------------------------
+  await teste('End-to-end: produto-compra retorna fonteCusto=ultima_compra custoUnitario=25.50', async () => {
+    setMockResponses({ produto_servico_cadastro: [{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}], total_de_paginas:1,total_de_registros:1,pagina:1,registros_por_pagina:1 }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
+    await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
+    await pausa();
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return { codigo_produto:"11835150482", codigo:"4084438", descricao:"CHAPA PSAI BRANCO TRICAMADA 1,00 X 1000 X 2000MM", unidade:"CH", ncm:"3920.30.00", valor_unitario:32.30 };
+      if (call === 'ListarMovimentoEstoque') return { movProdutoListar:[{idMov:90001,idDoc:7001,idProd:11835150482,dtMov:'15/07/2026',numDoc:'77001',operacao:'21',cancelamento:'N',devolucao:'N',qtde:10,valor:255,idRecebimento:5001}], nTotPaginas:1 };
+      if (call === 'ConsultarNotaEnt') return { cabec:{cNumNFe:"77001",dtEmissao:"15/07/2026",cNomeFornecedor:"Fornecedor PSAI"}, produtos:[{nCodProd:11835150482,cCodigo:"4084438",cDescricao:"CHAPA PSAI BRANCO TRICAMADA",nValUnit:25.50,ICMS:{nAliq:12},IPI:{nAliqIPI:0},PIS:{nAliqPIS:1.65},COFINS:{nAliqCOFINS:7.60},custos:{cICMSCusto:"S",cIPICusto:"N",cPISCusto:"N",cCOFINSCusto:"N"}}] };
+      if (call === 'PosicaoEstoque') return { saldo:0, cmc:22.32, fisico:0, reservado:0 };
+      if (call === 'ConsultarRecebimento') return { cRazaoSocial:"Fornecedor PSAI Ltda" };
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status,200);
+    assert.strictEqual(r.body.compra.fonteCusto,'ultima_compra');
+    assert.strictEqual(r.body.compra.custoUnitario,25.50);
+    assert.strictEqual(r.body.compra.valorUnitarioNota,25.50);
+    assert.strictEqual(r.body.compra.cmc,22.32);
+    assert.strictEqual(r.body.compra.saldo,0);
+    assert.strictEqual(r.body.compra.numeroNota,'77001');
+    assert.strictEqual(r.body.compra.fiscalCompraCompleto,true);
+    assert.strictEqual(r.body.compra.criterioSelecao,'maior_data_emissao');
+    assert.strictEqual(r.body.compra.criterioVinculo,'nota_entrada_item');
+    assert.strictEqual(r.body.produto.id,'11835150482');
+    assert.strictEqual(r.body.produto.codigo,'4084438');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 52. Contrato HTML: campos do backend correspondem ao que HTML consome
+  // ----------------------------------------------------------
+  await teste('Contrato HTML: todos os campos consumidos pelo HTML estao presentes na resposta', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/produto-compra?id=201&codigo=ACR-200');
+    assert.strictEqual(r.status,200);
+    const c = r.body.compra;
+    // Campos que o HTML consome (extraidos de aplicarDadosCompraOmieAoGrupo)
+    const camposObrigatorios = ['fonteCusto','custoUnitario','dataUltimaCompra','numeroNota','cmc','saldo','dataEstoque','tributosOrigem','valorUnitarioNota','custoLiquidoUnitario','fiscalCompraCompleto','tratamentoFiscal','criterioSelecao','criterioVinculo','codigoProdutoNfe','descricaoProdutoNfe','ipi','icms','pisCofins'];
+    for (const campo of camposObrigatorios) {
+      assert(campo in c, `Campo "${campo}" ausente na resposta compra`);
+    }
+    // fonteCusto deve ser 'ultima_compra' quando nota encontrada
+    assert.strictEqual(c.fonteCusto,'ultima_compra');
+    // Campos do produto
+    const p = r.body.produto;
+    assert.strictEqual(typeof p.id,'string');
+    assert.strictEqual(typeof p.codigo,'string');
+    assert.strictEqual(typeof p.descricao,'string');
+    assert.strictEqual(typeof p.unidade,'string');
+    assert.strictEqual(typeof p.ncm,'string');
+    assert.strictEqual(typeof p.valorUnitario,'number');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
   // RESULTADO FINAL
   // ----------------------------------------------------------
   await pararServidor();
