@@ -516,7 +516,7 @@ function movimentoEhCompraValida(m) {
   return true;
 }
 
-async function buscarMovimentosCompra(idProd) {
+async function buscarMovimentosCompra(idProd, diagnostico = null) {
   // Janelas NÃO sobrepostas: 0-2, 2-4, 4-6, 6-8, 8-10, 10-12 anos
   const janelas = [[0, 2], [2, 4], [4, 6], [6, 8], [8, 10], [10, 12]];
 
@@ -524,6 +524,9 @@ async function buscarMovimentosCompra(idProd) {
     const dtInicial = dataNAnosAtras(anosFim);
     const dtFinal = anosInicio === 0 ? dataHoje() : dataNAnosAtras(anosInicio);
     log('OMIE', `ListarMovimentoEstoque idProd=${idProd} janela=${anosInicio}-${anosFim} anos [${dtInicial} a ${dtFinal}]`);
+
+    const registro = { inicio: dtInicial, fim: dtFinal, janela: `${anosInicio}-${anosFim}`, resultado: 'executando', quantidadeMovimentos: 0 };
+    if (diagnostico && diagnostico.janelasConsultadas) diagnostico.janelasConsultadas.push(registro);
 
     try {
       let todosMovimentos = [];
@@ -546,25 +549,31 @@ async function buscarMovimentosCompra(idProd) {
         pagina++;
       } while (pagina <= totalPaginas);
 
+      registro.quantidadeMovimentos = todosMovimentos.length;
       const compras = todosMovimentos.filter(movimentoEhCompraValida);
 
       if (compras.length > 0) {
         compras.sort((a, b) => parseDataBR(obterDtMov(b)).getTime() - parseDataBR(obterDtMov(a)).getTime());
         const movimentoCompra = compras[0];
+        registro.resultado = 'compra_encontrada';
         log('OMIE', `Movimento compra encontrado janela ${anosInicio}-${anosFim} anos: idMov=${obterIdMov(movimentoCompra)} dt=${obterDtMov(movimentoCompra)}`);
         return movimentoCompra;
       }
 
+      registro.resultado = 'sem_registros';
       log('OMIE', `Nenhuma compra na janela ${anosInicio}-${anosFim} anos, avancando...`);
     } catch (e) {
       // Rate limit: PARAR imediatamente
-      if (e.isRateLimit) throw e;
+      if (e.isRateLimit) { registro.resultado = 'rate_limit'; throw e; }
       // "Não existem registros" = janela vazia, avançar normalmente
-      if (/[Nn]ão existem registros/i.test(e.message) || /não existem registros/i.test(e.message)) {
+      if (/[Nn]ão existem registros/i.test(e.message)) {
+        registro.resultado = 'sem_registros';
         log('OMIE', `Janela ${anosInicio}-${anosFim} sem registros (Omie), avancando...`);
         continue;
       }
       // Outro erro técnico: PARAR
+      registro.resultado = 'erro';
+      registro.erro = e.message;
       log('OMIE', `ListarMovimentoEstoque falhou janela ${anosInicio}-${anosFim}: ${e.message}`);
       throw e;
     }
@@ -601,7 +610,7 @@ async function buscarMovimentosCompra(idProd) {
 // NUNCA usa valor_unitario do ConsultarProduto como custoUnitario.
 // ============================================================
 
-async function buscarUltimaCompra(idProd, codigoProduto) {
+async function buscarUltimaCompra(idProd, codigoProduto, diagnostico = null) {
   const resultado = {
     fonteCusto: 'nao_encontrado',
     custoUnitario: 0,
@@ -632,7 +641,7 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
   // --- PASSO 2: Busca histórica de movimentos de compra ---
   let movimentoCompra = null;
   try {
-    movimentoCompra = await buscarMovimentosCompra(idProd);
+    movimentoCompra = await buscarMovimentosCompra(idProd, diagnostico);
   } catch (e) {
     if (e.isRateLimit) throw e; // Propagar rate limit — NÃO mascarar
     log('OMIE', `Busca de movimentos de compra falhou: ${e.message}`);
@@ -1128,8 +1137,8 @@ async function handler(req, res) {
 
   // GET /api/omie/debug-ultima-compra?id=xxx&codigo=yyy (TEMPORÁRIO — diagnóstico)
   // ============================================================
-  // Usa EXATAMENTE a mesma buscarMovimentosCompra() da produção.
-  // NUNCA retorna credenciais.
+  // Usa EXATAMENTE buscarUltimaCompra() da produção com diagnóstico.
+  // ZERO ConsultarProduto. ZERO chamadas extras.
   // ============================================================
   if (caminho === '/api/omie/debug-ultima-compra' && req.method === 'GET') {
     const id = (parsed.query.id || '').trim();
@@ -1139,10 +1148,13 @@ async function handler(req, res) {
     if (!conectado) return jsonResponse(res, 400, { error: 'Conecte-se ao Omie primeiro.' });
     if (!id && !codigo) return jsonResponse(res, 400, { error: 'Informe id ou codigo.' });
 
+    // produtoId direto — SEM ConsultarProduto
+    const idProd = id || null;
+    if (!idProd) return jsonResponse(res, 400, { error: 'Informe o id (codigo_produto Omie).' });
+
     const diag = {
-      produtoId: null,
+      produtoId: idProd,
       codigo: codigo || null,
-      etapas: [],
       janelasConsultadas: [],
       ultimaCompraCandidata: null,
       consultaNota: null,
@@ -1151,88 +1163,23 @@ async function handler(req, res) {
     };
 
     try {
-      // PASSO 1: Identificar produtoId
-      let idProd = null;
-      if (id) {
-        idProd = id;
-        // Validar produto via ConsultarProduto(codigo_produto: id)
-        try {
-          const r = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo_produto: Number(id) });
-          if (r && r.codigo_produto) {
-            diag.etapas.push({ etapa: 'ConsultarProduto', ok: true, codigo_produto: r.codigo_produto, codigoVisivel: r.codigo });
-          }
-        } catch (e) {
-          diag.etapas.push({ etapa: 'ConsultarProduto', param: { codigo_produto: Number(id) }, erro: e.message });
-        }
-      } else if (codigo) {
-        // Sem ID, buscar pelo código visível
-        try {
-          const r = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo: codigo });
-          if (r && r.codigo_produto) { idProd = String(r.codigo_produto); diag.etapas.push({ etapa: 'ConsultarProduto', ok: true, codigo_produto: r.codigo_produto }); }
-        } catch (e) { diag.etapas.push({ etapa: 'ConsultarProduto(codigo)', erro: e.message }); }
+      // Chama a MESMA função da produção, passando diagnostico
+      const compra = await buscarUltimaCompra(idProd, codigo, diag);
+      diag.resultadoFinal = { fonteCusto: compra.fonteCusto, custoUnitario: compra.custoUnitario };
+      if (compra.fonteCusto !== 'nao_encontrado') {
+        diag.ultimaCompraCandidata = {
+          numeroNota: compra.numeroNota,
+          dataUltimaCompra: compra.dataUltimaCompra,
+          valorUnitarioNota: compra.valorUnitarioNota,
+          cmc: compra.cmc,
+          saldo: compra.saldo
+        };
       }
-      if (!idProd) { diag.etapas.push({ etapa: 'ERRO', msg: 'Nenhum idProd identificado' }); return jsonResponse(res, 200, diag); }
-      diag.produtoId = idProd;
-
-      // PASSO 2: buscarMovimentosCompra — MESMA FUNÇÃO da produção
-      // Interceptar logs para capturar janelas consultadas
-      const logOriginal = log;
-      const janelasCapturadas = [];
-      let movimentoCompra = null;
-      try {
-        movimentoCompra = await buscarMovimentosCompra(idProd);
-      } catch (e) {
-        diag.etapas.push({ etapa: 'buscarMovimentosCompra', erro: e.message, isRateLimit: Boolean(e.isRateLimit) });
-      }
-
-      // Reconstruir janelas a partir dos mockCalls (em teste) ou logs
-      // Para diagnóstico real, reportar resultado
-      diag.etapas.push({ etapa: 'buscarMovimentosCompra', resultado: movimentoCompra ? 'encontrado' : 'nao_encontrado' });
-
-      if (!movimentoCompra) {
-        return jsonResponse(res, 200, diag);
-      }
-
-      diag.ultimaCompraCandidata = {
-        idMov: obterIdMov(movimentoCompra), dtMov: obterDtMov(movimentoCompra),
-        numDoc: movimentoCompra.numDoc || '', idDoc: obterIdDoc(movimentoCompra),
-        idRecebimento: movimentoCompra.idRecebimento || 0,
-        qtde: movimentoCompra.qtde || 0, valor: movimentoCompra.valor || 0
-      };
-
-      // PASSO 3: ConsultarNotaEnt
-      const idDocumento = obterIdDoc(movimentoCompra);
-      if (idDocumento) {
-        try {
-          const notaResp = await chamarOmieProtegido('produtos/notaentrada/', 'ConsultarNotaEnt', { nCodNotaEnt: idDocumento });
-          const cabec = notaResp.cabec || {};
-          const itens = notaResp.produtos || notaResp.itens || notaResp.produto_servico || [];
-          diag.consultaNota = { notaEncontrada: true, nCodNotaEnt: idDocumento, cNumNFe: cabec.cNumNFe || '', dtEmissao: cabec.dtEmissao || '', quantidadeItens: itens.length };
-          const itemNota = itens.find(p => Number(p.nCodProd ?? p.codigo_produto ?? 0) === Number(idProd));
-          if (itemNota) {
-            diag.itemNotaEncontrado = { encontrado: true, nCodProd: itemNota.nCodProd || itemNota.codigo_produto, nValUnit: itemNota.nValUnit || 0 };
-            diag.resultadoFinal = { fonteCusto: 'ultima_compra', custoUnitario: itemNota.nValUnit || 0 };
-          } else {
-            diag.itemNotaEncontrado = { encontrado: false, idProdBuscado: Number(idProd), idsNota: itens.map(p => p.nCodProd || p.codigo_produto) };
-            const vUnit = (movimentoCompra.qtde > 0) ? Math.round((movimentoCompra.valor / movimentoCompra.qtde) * 100) / 100 : 0;
-            diag.resultadoFinal = { fonteCusto: 'movimento_estoque', custoUnitario: vUnit };
-          }
-        } catch (e) {
-          diag.consultaNota = { notaEncontrada: false, nCodNotaEnt: idDocumento, erro: e.message };
-          const vUnit = (movimentoCompra.qtde > 0) ? Math.round((movimentoCompra.valor / movimentoCompra.qtde) * 100) / 100 : 0;
-          diag.resultadoFinal = { fonteCusto: 'movimento_estoque', custoUnitario: vUnit };
-        }
-      } else {
-        diag.consultaNota = { notaEncontrada: false, motivo: 'idDoc=0' };
-        const vUnit = (movimentoCompra.qtde > 0) ? Math.round((movimentoCompra.valor / movimentoCompra.qtde) * 100) / 100 : 0;
-        diag.resultadoFinal = { fonteCusto: 'movimento_estoque', custoUnitario: vUnit };
-      }
-
-      return jsonResponse(res, 200, diag);
     } catch (e) {
-      diag.etapas.push({ etapa: 'ERRO_GERAL', erro: e.message });
-      return jsonResponse(res, 200, diag);
+      diag.resultadoFinal = { fonteCusto: 'erro', erro: e.message, isRateLimit: Boolean(e.isRateLimit) };
     }
+
+    return jsonResponse(res, 200, diag);
   }
 
 

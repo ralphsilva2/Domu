@@ -1584,56 +1584,43 @@ async function executarTestes() {
   });
 
   await pausa();
-
   // ----------------------------------------------------------
-  // 44. Erro ListarMovimentoEstoque NÃO vira nao_encontrado silenciosamente
+  // 44. Erro ListarMovimentoEstoque NAO vira nao_encontrado silenciosamente
   // ----------------------------------------------------------
   await teste('Erro ListarMovimentoEstoque nao vira nao_encontrado silenciosamente', async () => {
     setMockRouter((parsed) => {
       const call = parsed.call;
-      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
       if (call === 'ListarMovimentoEstoque') return { faultstring: "Erro interno do servidor", faultcode: "SOAP-500" };
       if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
       return {};
     });
-
     const r = await requisicaoLocal('GET', '/api/omie/debug-ultima-compra?id=201&codigo=ACR-200');
     assert.strictEqual(r.status, 200);
-    const etapaErro = r.body.etapas.find(e => e.etapa === 'buscarMovimentosCompra' && e.erro);
-    assert(etapaErro, 'Deve registrar erro de buscarMovimentosCompra');
-    assert(etapaErro.erro.length > 0, 'Erro deve ter mensagem');
+    assert.strictEqual(r.body.resultadoFinal.fonteCusto, 'erro');
+    assert(r.body.resultadoFinal.erro.length > 0);
   });
 
   await pausa();
 
   // ----------------------------------------------------------
-  // 45. Erro ConsultarNotaEnt aparece no diagnóstico
+  // 45. Erro ConsultarNotaEnt → fallback movimento_estoque
   // ----------------------------------------------------------
-  await teste('Erro ConsultarNotaEnt aparece no diagnostico', async () => {
+  await teste('Erro ConsultarNotaEnt: fallback para movimento_estoque', async () => {
     setMockRouter((parsed) => {
       const call = parsed.call;
-      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
-      if (call === 'ListarMovimentoEstoque') return {
-        movProdutoListar: [{ idMov: 1, idDoc: 9999, idProd: 201, dtMov: '01/08/2026', operacao: '21', cancelamento: 'N', devolucao: 'N', qtde: 5, valor: 500 }],
-        nTotPaginas: 1
-      };
-      if (call === 'ConsultarNotaEnt') return { faultstring: "Registro não encontrado", faultcode: "SOAP-404" };
+      if (call === 'ListarMovimentoEstoque') return { movProdutoListar: [{ idMov: 1, idDoc: 9999, idProd: 201, dtMov: '01/08/2026', operacao: '21', cancelamento: 'N', devolucao: 'N', qtde: 5, valor: 500 }], nTotPaginas: 1 };
+      if (call === 'ConsultarNotaEnt') return { faultstring: "Registro nao encontrado", faultcode: "SOAP-404" };
       if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
       return {};
     });
-
-    const r = await requisicaoLocal('GET', '/api/omie/debug-ultima-compra?id=201&codigo=ACR-200');
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=201&codigo=ACR-200');
     assert.strictEqual(r.status, 200);
-    assert.strictEqual(r.body.consultaNota.notaEncontrada, false);
-    assert(r.body.consultaNota.erro.length > 0, 'Erro da nota deve ter mensagem');
-    // Resultado deve cair no fallback movimento_estoque
-    assert.strictEqual(r.body.resultadoFinal.fonteCusto, 'movimento_estoque');
-    assert.strictEqual(r.body.resultadoFinal.custoUnitario, 100); // 500/5
+    assert.strictEqual(r.body.compra.fonteCusto, 'movimento_estoque');
+    assert.strictEqual(r.body.compra.custoUnitario, 100);
   });
 
   await pausa();
 
-  // ----------------------------------------------------------
   // 46. Categoria chapa-petg: filtra PETG corretamente
   // ----------------------------------------------------------
   await teste('Categoria chapa-petg: filtra por regra PETG', async () => {
@@ -2054,6 +2041,137 @@ async function executarTestes() {
     assert.strictEqual(r.body.compra.custoUnitario, 25.00);
     // Deve ter passado por pelo menos 3 janelas
     assert(chamadaMov >= 3, `Deve ter consultado pelo menos 3 janelas, consultou ${chamadaMov}`);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 60. TESTE A: Debug com cache vazio — zero ConsultarProduto
+  // ----------------------------------------------------------
+  await teste('Debug cache vazio: zero ConsultarProduto', async () => {
+    setMockResponses({ produto_servico_cadastro:[{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}], total_de_paginas:1,total_de_registros:1,pagina:1,registros_por_pagina:1 }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
+    await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
+    await pausa();
+    mockCalls = [];
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar:[{idMov:1,idDoc:7001,idProd:11835150482,dtMov:'15/07/2026',operacao:'21',cancelamento:'N',devolucao:'N',qtde:10,valor:255}], nTotPaginas:1 };
+      if (parsed.call === 'ConsultarNotaEnt') return { cabec:{cNumNFe:"77001",dtEmissao:"15/07/2026"}, produtos:[{nCodProd:11835150482,nValUnit:25.50}] };
+      if (parsed.call === 'PosicaoEstoque') return { saldo:0,cmc:22.32,fisico:0,reservado:0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/debug-ultima-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status,200);
+    const cpCalls = mockCalls.filter(c => c.parsed?.call === 'ConsultarProduto');
+    assert.strictEqual(cpCalls.length, 0, 'Debug: zero ConsultarProduto');
+    assert.strictEqual(r.body.resultadoFinal.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r.body.resultadoFinal.custoUnitario, 25.50);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 61. TESTE B: 6 janelas vazias → janelasConsultadas.length=6
+  // ----------------------------------------------------------
+  await teste('6 janelas vazias: janelasConsultadas.length=6, fonteCusto=nao_encontrado', async () => {
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar:[], nTotPaginas:1 };
+      if (parsed.call === 'PosicaoEstoque') return { saldo:0,cmc:0,fisico:0,reservado:0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/debug-ultima-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status,200);
+    assert.strictEqual(r.body.janelasConsultadas.length, 6);
+    assert.strictEqual(r.body.resultadoFinal.fonteCusto, 'nao_encontrado');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 62. TESTE C: Compra na 3ª janela → janelasConsultadas.length=3
+  // ----------------------------------------------------------
+  await teste('Compra na 3a janela: janelasConsultadas.length=3', async () => {
+    let chamada = 0;
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarMovimentoEstoque') {
+        chamada++;
+        if (chamada <= 2) return { movProdutoListar:[], nTotPaginas:1 };
+        return { movProdutoListar:[{idMov:1,idDoc:7001,idProd:11835150482,dtMov:'01/01/2022',operacao:'21',cancelamento:'N',devolucao:'N',qtde:5,valor:125}], nTotPaginas:1 };
+      }
+      if (parsed.call === 'ConsultarNotaEnt') return { cabec:{cNumNFe:"7001"}, produtos:[{nCodProd:11835150482,nValUnit:25.00}] };
+      if (parsed.call === 'PosicaoEstoque') return { saldo:0,cmc:0,fisico:0,reservado:0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/debug-ultima-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status,200);
+    assert.strictEqual(r.body.janelasConsultadas.length, 3);
+    assert.strictEqual(r.body.janelasConsultadas[2].resultado, 'compra_encontrada');
+    assert.strictEqual(r.body.resultadoFinal.fonteCusto, 'ultima_compra');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 63. TESTE D: "Não existem registros" avança para próxima janela
+  // ----------------------------------------------------------
+  await teste('Nao existem registros avanca janela no debug', async () => {
+    let chamada = 0;
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarMovimentoEstoque') {
+        chamada++;
+        if (chamada === 1) return { faultstring:"ERROR: Não existem registros para a página [1]!", faultcode:"0" };
+        return { movProdutoListar:[{idMov:1,idDoc:7001,idProd:11835150482,dtMov:'01/06/2024',operacao:'21',cancelamento:'N',devolucao:'N',qtde:3,valor:75}], nTotPaginas:1 };
+      }
+      if (parsed.call === 'ConsultarNotaEnt') return { cabec:{}, produtos:[{nCodProd:11835150482,nValUnit:25.00}] };
+      if (parsed.call === 'PosicaoEstoque') return { saldo:0,cmc:0,fisico:0,reservado:0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/debug-ultima-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status,200);
+    assert(r.body.janelasConsultadas.length >= 2, 'Deve ter consultado ao menos 2 janelas');
+    assert.strictEqual(r.body.janelasConsultadas[0].resultado, 'sem_registros');
+    assert.strictEqual(r.body.resultadoFinal.fonteCusto, 'ultima_compra');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 64. TESTE E: Rate limit na 1ª janela → interrompe, NÃO nao_encontrado
+  // ----------------------------------------------------------
+  await teste('Rate limit na 1a janela: interrompe, NAO nao_encontrado', async () => {
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { faultstring:"API bloqueada por consumo indevido. Tente novamente em 300 segundos.", faultcode:"0" };
+      if (parsed.call === 'PosicaoEstoque') return { saldo:0,cmc:0,fisico:0,reservado:0 };
+      return {};
+    });
+    const conector = require('./conector-omie.js');
+    conector.circuitBreaker.clear();
+    const r = await requisicaoLocal('GET','/api/omie/debug-ultima-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status,200);
+    assert.notStrictEqual(r.body.resultadoFinal.fonteCusto, 'nao_encontrado');
+    assert.strictEqual(r.body.resultadoFinal.fonteCusto, 'erro');
+    assert(r.body.janelasConsultadas.length <= 1, 'Deve parar na 1a janela');
+    conector.circuitBreaker.clear();
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 65. TESTE G: Debug HTTP com janelasConsultadas preenchido
+  // ----------------------------------------------------------
+  await teste('Debug HTTP: janelasConsultadas NAO pode ser vazio quando busca executou', async () => {
+    setMockRouter((parsed) => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar:[], nTotPaginas:1 };
+      if (parsed.call === 'PosicaoEstoque') return { saldo:0,cmc:0,fisico:0,reservado:0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET','/api/omie/debug-ultima-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status,200);
+    assert(r.body.janelasConsultadas.length > 0, 'janelasConsultadas NAO pode ser []');
+    r.body.janelasConsultadas.forEach(j => {
+      assert(j.inicio, 'Janela deve ter inicio');
+      assert(j.fim, 'Janela deve ter fim');
+      assert(j.resultado, 'Janela deve ter resultado');
+    });
   });
 
   await pausa();
