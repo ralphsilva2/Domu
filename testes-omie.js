@@ -1459,27 +1459,177 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
-  // 39. Contrato fonteCusto: backend NUNCA retorna 'ultima_compra_nota_entrada'
+  // 40. lista_local_estoque=TODOS: compra em local diferente do DOMU
   // ----------------------------------------------------------
-  await teste('Contrato fonteCusto: backend retorna "ultima_compra" (NAO "ultima_compra_nota_entrada")', async () => {
+  await teste('lista_local_estoque=TODOS: encontra compra em local diferente do DOMU', async () => {
+    mockCalls = [];
     setMockRouter((parsed) => {
       const call = parsed.call;
-      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
-      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
-      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
-      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
-      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      if (call === 'ConsultarProduto') return { codigo_produto: "11835150482", codigo: "4084438", descricao: "CHAPA PSAI", unidade: "CH", valor_unitario: 32.30 };
+      if (call === 'ListarMovimentoEstoque') {
+        // Verifica que lista_local_estoque=TODOS foi enviado
+        return { movProdutoListar: [
+          { idMov: 80001, idDoc: 6001, idProd: 11835150482, dtMov: '10/06/2026', numDoc: '66001', operacao: '21', cancelamento: 'N', devolucao: 'N', qtde: 5, valor: 127.50, idRecebimento: 4001, codigo_local_estoque: 99 }
+        ], nTotPaginas: 1 };
+      }
+      if (call === 'ConsultarNotaEnt') return {
+        cabec: { cNumNFe: "66001", dtEmissao: "10/06/2026", cNomeFornecedor: "Forn X" },
+        produtos: [{ nCodProd: 11835150482, cCodigo: "4084438", nValUnit: 25.50, cDescricao: "CHAPA PSAI", ICMS: {nAliq: 12}, IPI: {nAliqIPI: 0}, PIS: {nAliqPIS: 1.65}, COFINS: {nAliqCOFINS: 7.60} }]
+      };
+      if (call === 'PosicaoEstoque') return { saldo: 0, cmc: 22.32, fisico: 0, reservado: 0 };
+      if (call === 'ConsultarRecebimento') return { cRazaoSocial: "Forn X" };
       return {};
     });
 
-    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
     assert.strictEqual(r.status, 200);
-    // CONTRATO: fonteCusto DEVE ser exatamente 'ultima_compra'
     assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
-    // NUNCA deve ser 'ultima_compra_nota_entrada'
-    assert.notStrictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
-    assert.notStrictEqual(r.body.compra.fonteCusto, 'ultima_compra_movimento');
-    assert(r.body.compra.custoUnitario > 0, 'custoUnitario deve ser > 0');
+    assert.strictEqual(r.body.compra.custoUnitario, 25.50);
+    assert.strictEqual(r.body.compra.cmc, 22.32);
+    assert.strictEqual(r.body.compra.saldo, 0);
+
+    // Verifica que lista_local_estoque=TODOS foi usado
+    const movCall = mockCalls.find(c => c.parsed?.call === 'ListarMovimentoEstoque');
+    assert(movCall, 'Deve ter chamado ListarMovimentoEstoque');
+    assert.strictEqual(movCall.parsed.param[0].lista_local_estoque, 'TODOS');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 41. Saldo DOMU = 0 mas compra historica existente → ultima_compra
+  // ----------------------------------------------------------
+  await teste('Saldo DOMU=0 + compra historica = ultima_compra com custo', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return { codigo_produto: "11835150482", codigo: "4084438", descricao: "CHAPA PSAI BRANCO TRICAMADA", unidade: "CH", valor_unitario: 32.30 };
+      if (call === 'ListarMovimentoEstoque') return {
+        movProdutoListar: [{ idMov: 90001, idDoc: 7001, idProd: 11835150482, dtMov: '15/07/2026', numDoc: '77001', operacao: '21', cancelamento: 'N', devolucao: 'N', qtde: 10, valor: 255, idRecebimento: 5001 }],
+        nTotPaginas: 1
+      };
+      if (call === 'ConsultarNotaEnt') return {
+        cabec: { cNumNFe: "77001", dtEmissao: "15/07/2026", cNomeFornecedor: "Fornecedor Y" },
+        produtos: [{ nCodProd: 11835150482, nValUnit: 25.50, cCodigo: "4084438", cDescricao: "CHAPA PSAI BRANCO" }]
+      };
+      if (call === 'PosicaoEstoque') return { saldo: 0, cmc: 22.32, fisico: 0, reservado: 0 };
+      if (call === 'ConsultarRecebimento') return {};
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r.body.compra.custoUnitario, 25.50);
+    assert.strictEqual(r.body.compra.valorUnitarioNota, 25.50);
+    assert.strictEqual(r.body.compra.cmc, 22.32);
+    assert.strictEqual(r.body.compra.saldo, 0);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 42. Operação 22 também é aceita como compra válida
+  // ----------------------------------------------------------
+  await teste('Operacao 22 aceita como compra valida', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return {
+        movProdutoListar: [{ idMov: 1001, idDoc: 2001, idProd: 201, dtMov: '01/08/2026', numDoc: '88001', operacao: '22', cancelamento: 'N', devolucao: 'N', qtde: 3, valor: 450, idRecebimento: 3001 }],
+        nTotPaginas: 1
+      };
+      if (call === 'ConsultarNotaEnt') return {
+        cabec: { cNumNFe: "88001", dtEmissao: "01/08/2026" },
+        produtos: [{ nCodProd: 201, nValUnit: 150.00, cCodigo: "ACR-200" }]
+      };
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return {};
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=201&codigo=ACR-200');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r.body.compra.custoUnitario, 150.00);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 43. Paginação com mais de uma página de movimentos
+  // ----------------------------------------------------------
+  await teste('Paginacao: busca multiplas paginas de movimentos', async () => {
+    let chamadaMovimento = 0;
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') {
+        chamadaMovimento++;
+        if (chamadaMovimento === 1) return { movProdutoListar: [{ idMov: 1, idDoc: 0, idProd: 201, dtMov: '01/01/2026', operacao: '30', cancelamento: 'N', qtde: 1, valor: 10 }], nTotPaginas: 2 };
+        if (chamadaMovimento === 2) return { movProdutoListar: [{ idMov: 2, idDoc: 5001, idProd: 201, dtMov: '15/05/2026', numDoc: '55001', operacao: '21', cancelamento: 'N', devolucao: 'N', qtde: 8, valor: 800, idRecebimento: 6001 }], nTotPaginas: 2 };
+        return { movProdutoListar: [], nTotPaginas: 2 };
+      }
+      if (call === 'ConsultarNotaEnt') return {
+        cabec: { cNumNFe: "55001", dtEmissao: "15/05/2026" },
+        produtos: [{ nCodProd: 201, nValUnit: 100.00, cCodigo: "ACR-200" }]
+      };
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return {};
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=201&codigo=ACR-200');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r.body.compra.custoUnitario, 100.00);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 44. Erro ListarMovimentoEstoque NÃO vira nao_encontrado silenciosamente
+  // ----------------------------------------------------------
+  await teste('Erro ListarMovimentoEstoque nao vira nao_encontrado silenciosamente', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return { faultstring: "Erro interno do servidor", faultcode: "SOAP-500" };
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/debug-ultima-compra?id=201&codigo=ACR-200');
+    assert.strictEqual(r.status, 200);
+    const etapaErro = r.body.etapas.find(e => e.etapa === 'ListarMovimentoEstoque');
+    assert(etapaErro, 'Deve registrar erro de ListarMovimentoEstoque');
+    assert(etapaErro.erro.length > 0, 'Erro deve ter mensagem');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 45. Erro ConsultarNotaEnt aparece no diagnóstico
+  // ----------------------------------------------------------
+  await teste('Erro ConsultarNotaEnt aparece no diagnostico', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return {
+        movProdutoListar: [{ idMov: 1, idDoc: 9999, idProd: 201, dtMov: '01/08/2026', operacao: '21', cancelamento: 'N', devolucao: 'N', qtde: 5, valor: 500 }],
+        nTotPaginas: 1
+      };
+      if (call === 'ConsultarNotaEnt') return { faultstring: "Registro não encontrado", faultcode: "SOAP-404" };
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/debug-ultima-compra?id=201&codigo=ACR-200');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.consultaNota.notaEncontrada, false);
+    assert(r.body.consultaNota.erro.length > 0, 'Erro da nota deve ter mensagem');
+    // Resultado deve cair no fallback movimento_estoque
+    assert.strictEqual(r.body.resultadoFinal.fonteCusto, 'movimento_estoque');
+    assert.strictEqual(r.body.resultadoFinal.custoUnitario, 100); // 500/5
   });
 
   await pausa();

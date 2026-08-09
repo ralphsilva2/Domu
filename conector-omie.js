@@ -461,7 +461,8 @@ async function buscarMovimentosCompra(idProd) {
           dDtInicial: dtInicial,
           dDtFinal: dtFinal,
           nPagina: pagina,
-          nRegPorPagina: 500
+          nRegPorPagina: 500,
+          lista_local_estoque: 'TODOS'
         });
 
         const movimentos = extrairMovimentos(movResp);
@@ -955,7 +956,7 @@ async function handler(req, res) {
       } else {
         // Sem idProd, retorna estrutura vazia
         compra = {
-          fonteCusto: 'sem_ultima_compra',
+          fonteCusto: 'nao_encontrado',
           custoUnitario: 0,
           custoLiquidoUnitario: 0,
           dataUltimaCompra: '',
@@ -1030,6 +1031,182 @@ async function handler(req, res) {
       return erroOmie(res, e);
     }
   }
+
+  // GET /api/omie/debug-ultima-compra?id=xxx&codigo=yyy (TEMPORÁRIO — diagnóstico)
+  // ============================================================
+  // Executa as MESMAS chamadas de /api/omie/produto-compra mas retorna
+  // diagnóstico detalhado de cada etapa. NUNCA retorna credenciais.
+  // ============================================================
+  if (caminho === '/api/omie/debug-ultima-compra' && req.method === 'GET') {
+    const id = (parsed.query.id || '').trim();
+    const codigo = (parsed.query.codigo || '').trim();
+    log('DOMU', `GET /api/omie/debug-ultima-compra?id=${id}&codigo=${codigo}`);
+
+    if (!conectado) return jsonResponse(res, 400, { error: 'Conecte-se ao Omie primeiro.' });
+    if (!id && !codigo) return jsonResponse(res, 400, { error: 'Informe id ou codigo.' });
+
+    const diag = {
+      produtoId: null,
+      codigo: codigo || null,
+      etapas: [],
+      movimentoRequest: null,
+      movimentoResponse: null,
+      todosMovimentos: [],
+      comprasEncontradas: [],
+      ultimaCompraCandidata: null,
+      consultaNota: null,
+      itemNotaEncontrado: null,
+      resultadoFinal: { fonteCusto: 'nao_encontrado', custoUnitario: 0 }
+    };
+
+    try {
+      // PASSO 1: ConsultarProduto
+      let idProd = null;
+      if (codigo) {
+        try {
+          const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
+          if (r && r.codigo_produto) { idProd = r.codigo_produto; diag.etapas.push({ etapa: 'ConsultarProduto', ok: true, codigo_produto: r.codigo_produto }); }
+        } catch (e) { diag.etapas.push({ etapa: 'ConsultarProduto(codigo)', erro: e.message }); }
+      }
+      if (!idProd && id) {
+        try {
+          const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto_integracao: id });
+          if (r && r.codigo_produto) { idProd = r.codigo_produto; diag.etapas.push({ etapa: 'ConsultarProduto(integracao)', ok: true, codigo_produto: r.codigo_produto }); }
+        } catch (e) { diag.etapas.push({ etapa: 'ConsultarProduto(integracao)', erro: e.message }); }
+      }
+      if (!idProd && id) idProd = id;
+      diag.produtoId = idProd;
+
+      if (!idProd) { diag.etapas.push({ etapa: 'ERRO', msg: 'Nenhum idProd identificado' }); return jsonResponse(res, 200, diag); }
+
+      // PASSO 2: ListarMovimentoEstoque — TODOS os locais, janela 12 anos
+      const dtInicial = dataNAnosAtras(12);
+      const dtFinal = dataHoje();
+      diag.movimentoRequest = { idProd: Number(idProd), dDtInicial: dtInicial, dDtFinal: dtFinal, lista_local_estoque: 'TODOS' };
+
+      let pagina = 1;
+      let totalPaginas = 1;
+      let todosMovRaw = [];
+      let movErro = null;
+
+      do {
+        try {
+          const movResp = await chamarOmie('estoque/consulta/', 'ListarMovimentoEstoque', {
+            idProd: Number(idProd),
+            dDtInicial: dtInicial,
+            dDtFinal: dtFinal,
+            nPagina: pagina,
+            nRegPorPagina: 500,
+            lista_local_estoque: 'TODOS'
+          });
+
+          if (pagina === 1) {
+            diag.movimentoResponse = {
+              chavesResposta: Object.keys(movResp),
+              nPagina: movResp.nPagina || pagina,
+              nTotPaginas: extrairTotalPaginas(movResp),
+              nTotRegistros: movResp.nTotRegistros || movResp.total_de_registros || 0,
+              temMovProdutoListar: Array.isArray(movResp.movProdutoListar),
+              quantidadeMovProdutoListar: (movResp.movProdutoListar || []).length,
+              temMovimentos: Array.isArray(movResp.movimentos),
+              quantidadeMovimentos: (movResp.movimentos || []).length
+            };
+          }
+
+          const movimentos = extrairMovimentos(movResp);
+          todosMovRaw.push(...movimentos);
+          totalPaginas = extrairTotalPaginas(movResp);
+          pagina++;
+        } catch (e) {
+          movErro = e.message;
+          diag.etapas.push({ etapa: 'ListarMovimentoEstoque', erro: e.message, pagina });
+          break;
+        }
+      } while (pagina <= totalPaginas);
+
+      // Campos seguros de cada movimento (max 20)
+      diag.todosMovimentos = todosMovRaw.slice(0, 20).map(m => ({
+        idMov: obterIdMov(m), dtMov: obterDtMov(m), dtEmissao: m.dtEmissao || '',
+        numDoc: m.numDoc || '', operacao: obterOperacao(m),
+        cancelamento: m.cancelamento || '', devolucao: m.devolucao || '',
+        idDoc: obterIdDoc(m), idRecebimento: m.idRecebimento || 0,
+        codigo_local_estoque: m.codigo_local_estoque || m.nCodLocalEstoque || '',
+        idProd: m.idProd || m.nIdProd || '', tipo: m.tipo || '',
+        descricao: m.descricao || '', qtde: m.qtde || 0, valor: m.valor || 0
+      }));
+
+      // Filtrar compras válidas
+      const compras = todosMovRaw.filter(movimentoEhCompraValida);
+      diag.comprasEncontradas = compras.slice(0, 10).map(m => ({
+        idMov: obterIdMov(m), dtMov: obterDtMov(m), numDoc: m.numDoc || '',
+        operacao: obterOperacao(m), idDoc: obterIdDoc(m),
+        idRecebimento: m.idRecebimento || 0, qtde: m.qtde || 0, valor: m.valor || 0
+      }));
+
+      if (compras.length === 0) {
+        diag.etapas.push({ etapa: 'FiltroCompras', msg: `${todosMovRaw.length} movimentos brutos, 0 compras validas`, movErro });
+        return jsonResponse(res, 200, diag);
+      }
+
+      // Ordenar e pegar mais recente
+      compras.sort((a, b) => parseDataBR(obterDtMov(b)).getTime() - parseDataBR(obterDtMov(a)).getTime());
+      const melhor = compras[0];
+      diag.ultimaCompraCandidata = {
+        idMov: obterIdMov(melhor), dtMov: obterDtMov(melhor), numDoc: melhor.numDoc || '',
+        idDoc: obterIdDoc(melhor), idRecebimento: melhor.idRecebimento || 0,
+        qtde: melhor.qtde || 0, valor: melhor.valor || 0
+      };
+
+      // PASSO 3: ConsultarNotaEnt
+      const idDocumento = obterIdDoc(melhor);
+      if (idDocumento) {
+        try {
+          const notaResp = await chamarOmie('produtos/notaentrada/', 'ConsultarNotaEnt', { nCodNotaEnt: idDocumento });
+          const cabec = notaResp.cabec || {};
+          const itens = notaResp.produtos || notaResp.itens || notaResp.produto_servico || [];
+          diag.consultaNota = {
+            notaEncontrada: true,
+            nCodNotaEnt: idDocumento,
+            cNumNFe: cabec.cNumNFe || '',
+            dtEmissao: cabec.dtEmissao || '',
+            quantidadeItens: itens.length,
+            chavesNota: Object.keys(notaResp)
+          };
+
+          const itemNota = itens.find(p => Number(p.nCodProd ?? p.codigo_produto ?? 0) === Number(idProd));
+          if (itemNota) {
+            diag.itemNotaEncontrado = {
+              encontrado: true,
+              nCodProd: itemNota.nCodProd || itemNota.codigo_produto,
+              nValUnit: itemNota.nValUnit || 0,
+              cCodigo: itemNota.cCodigo || '',
+              cDescricao: itemNota.cDescricao || ''
+            };
+            diag.resultadoFinal = { fonteCusto: 'ultima_compra', custoUnitario: itemNota.nValUnit || 0 };
+          } else {
+            diag.itemNotaEncontrado = { encontrado: false, idProdBuscado: Number(idProd), idsNota: itens.map(p => p.nCodProd || p.codigo_produto) };
+            // Fallback movimento
+            const vUnit = (melhor.qtde > 0) ? Math.round((melhor.valor / melhor.qtde) * 100) / 100 : 0;
+            diag.resultadoFinal = { fonteCusto: 'movimento_estoque', custoUnitario: vUnit };
+          }
+        } catch (e) {
+          diag.consultaNota = { notaEncontrada: false, nCodNotaEnt: idDocumento, erro: e.message };
+          const vUnit = (melhor.qtde > 0) ? Math.round((melhor.valor / melhor.qtde) * 100) / 100 : 0;
+          diag.resultadoFinal = { fonteCusto: 'movimento_estoque', custoUnitario: vUnit };
+        }
+      } else {
+        diag.consultaNota = { notaEncontrada: false, motivo: 'idDoc=0 no movimento' };
+        const vUnit = (melhor.qtde > 0) ? Math.round((melhor.valor / melhor.qtde) * 100) / 100 : 0;
+        diag.resultadoFinal = { fonteCusto: 'movimento_estoque', custoUnitario: vUnit };
+      }
+
+      return jsonResponse(res, 200, diag);
+    } catch (e) {
+      diag.etapas.push({ etapa: 'ERRO_GERAL', erro: e.message });
+      return jsonResponse(res, 200, diag);
+    }
+  }
+
 
     // ==================== STATIC FILES ====================
 
