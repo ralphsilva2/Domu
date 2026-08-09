@@ -4505,7 +4505,7 @@ function normalizarComposicoesCarregadas() {
       }
     }
     if (materialVinculadoOmie
-      && (peca.omieFonteCusto !== 'ultima_compra'
+      && (!fonteCustoValida(peca.omieFonteCusto)
         || peca.omieCriterioSelecao !== 'maior_data_emissao'
         || !peca.omieFiscalCompraCompleto)
       && !comprasParaAtualizar.some(compra => compra.referencia === peca)) {
@@ -4616,7 +4616,7 @@ function normalizarComposicoesCarregadas() {
         }
       }
       if (possuiReferenciaProdutoOmie(normalizado)
-        && (normalizado.omieFonteCusto !== 'ultima_compra'
+        && (!fonteCustoValida(normalizado.omieFonteCusto)
           || normalizado.omieCriterioSelecao !== 'maior_data_emissao'
           || !normalizado.omieFiscalCompraCompleto)
         && !comprasParaAtualizar.some(compra => compra.referencia === normalizado)) {
@@ -5383,7 +5383,7 @@ function consolidarMateriaisBom() {
       ? grupo.pesoCompra
       : (grupo.unidadeComercial === 'MT' ? grupo.analise.quantidadeMetros : grupo.quantidadeFisicaCompra);
     grupo.custoBruto = grupo.quantidadeCompra * grupo.custoUnitario;
-    grupo.custoLiquidoUnitario = grupo.omieFonteCusto === 'ultima_compra' && grupo.omieFiscalCompraCompleto
+    grupo.custoLiquidoUnitario = fonteCustoValida(grupo.omieFonteCusto) && grupo.omieFiscalCompraCompleto
       ? grupo.omieCustoLiquidoUnitario
       : grupo.custoUnitario;
     grupo.custoSemIpi = grupo.quantidadeCompra * grupo.custoLiquidoUnitario;
@@ -5450,7 +5450,7 @@ function consolidarItensCompradosBom() {
   });
   return Array.from(grupos.values()).map(grupo => {
     grupo.custoBruto = grupo.quantidadeCompra * grupo.custoUnitario;
-    grupo.custoLiquidoUnitario = grupo.omieFonteCusto === 'ultima_compra' && grupo.omieFiscalCompraCompleto
+    grupo.custoLiquidoUnitario = fonteCustoValida(grupo.omieFonteCusto) && grupo.omieFiscalCompraCompleto
       ? grupo.omieCustoLiquidoUnitario
       : grupo.custoUnitario;
     grupo.custoSemIpi = grupo.quantidadeCompra * grupo.custoLiquidoUnitario;
@@ -5463,10 +5463,20 @@ function chaveBuscaOmieBom(tipo, chave) {
   return tipo + '|' + chave;
 }
 
+// Verifica se fonteCusto indica que um custo real de compra foi encontrado.
+// O backend retorna 'ultima_compra_nota_entrada' ou 'ultima_compra_movimento'.
+// Versoes legadas usavam 'ultima_compra'. Aceita todos.
+function fonteCustoValida(fonte) {
+  return typeof fonte === 'string' && fonte.startsWith('ultima_compra');
+}
+
 function rotuloFonteCustoOmie(fonte) {
+  if (fonte === 'ultima_compra_nota_entrada') return 'Último recebimento de NF-e';
+  if (fonte === 'ultima_compra_movimento') return 'Último movimento de compra';
   if (fonte === 'ultima_compra') return 'Último recebimento de NF-e';
   if (fonte === 'movimento_estoque') return 'Último movimento de compra';
   if (fonte === 'cmc') return 'CMC antigo (não utilizado)';
+  if (fonte === 'sem_ultima_compra') return 'Não localizado';
   return 'Não localizado';
 }
 
@@ -5578,7 +5588,7 @@ function localizarGrupoBomPorReferencia(tipo, referencia) {
 function aplicarDadosCompraOmieAoGrupo(tipo, grupo, compra, produto = null) {
   if (!grupo || !compra) return;
   const fonteCusto = String(compra.fonteCusto || 'nao_encontrado');
-  const custo = fonteCusto === 'ultima_compra'
+  const custo = fonteCustoValida(fonteCusto)
     ? Math.max(0, parseFloat(compra.custoUnitario) || 0)
     : 0;
   const dados = {
