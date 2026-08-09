@@ -14,9 +14,9 @@ const assert = require('assert');
 
 const FIXTURE_LISTAR_PRODUTOS_P1 = {
   produto_servico_cadastro: [
-    {codigo_produto: "PSAI-050", codigo_produto_integracao: "101", descricao: "CHAPA PSAI CRISTAL 0,50 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3920.30.00", valor_unitario: 45.80},
-    {codigo_produto: "PSAI-075", codigo_produto_integracao: "102", descricao: "CHAPA PSAI CRISTAL 0,75 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3920.30.00", valor_unitario: 62.50},
-    {codigo_produto: "ACR-200", codigo_produto_integracao: "201", descricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3926.90.90", valor_unitario: 200.00},
+    {codigo_produto: "101", codigo: "PSAI-050", codigo_produto_integracao: "INT-101", descricao: "CHAPA PSAI CRISTAL 0,50 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3920.30.00", valor_unitario: 45.80, tipoItem: "01", inativo: "N"},
+    {codigo_produto: "102", codigo: "PSAI-075", codigo_produto_integracao: "INT-102", descricao: "CHAPA PSAI CRISTAL 0,75 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3920.30.00", valor_unitario: 62.50, tipoItem: "01", inativo: "N"},
+    {codigo_produto: "201", codigo: "ACR-200", codigo_produto_integracao: "INT-201", descricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM", unidade: "CH", ncm: "3926.90.90", valor_unitario: 200.00, tipoItem: "01", inativo: "N"},
   ],
   total_de_paginas: 2,
   total_de_registros: 5,
@@ -26,8 +26,8 @@ const FIXTURE_LISTAR_PRODUTOS_P1 = {
 
 const FIXTURE_LISTAR_PRODUTOS_P2 = {
   produto_servico_cadastro: [
-    {codigo_produto: "MDF-060", codigo_produto_integracao: "301", descricao: "CHAPA MDF CRU 6,00 MM — 1840 X 2750 MM", unidade: "CH", ncm: "4411.12.10", valor_unitario: 89.90},
-    {codigo_produto: "TQ-2020-120", codigo_produto_integracao: "401", descricao: "TUBO QUADRADO AÇO 20 X 20 X 1,20 MM — BARRA 6000 MM", unidade: "UN", ncm: "7306.61.00", valor_unitario: 32.40}
+    {codigo_produto: "301", codigo: "MDF-060", codigo_produto_integracao: "INT-301", descricao: "CHAPA MDF CRU 6,00 MM — 1840 X 2750 MM", unidade: "CH", ncm: "4411.12.10", valor_unitario: 89.90, tipoItem: "01", inativo: "N"},
+    {codigo_produto: "401", codigo: "TQ-2020-120", codigo_produto_integracao: "INT-401", descricao: "TUBO QUADRADO AÇO 20 X 20 X 1,20 MM — BARRA 6000 MM", unidade: "UN", ncm: "7306.61.00", valor_unitario: 32.40, tipoItem: "01", inativo: "N"}
   ],
   total_de_paginas: 2,
   total_de_registros: 5,
@@ -37,8 +37,9 @@ const FIXTURE_LISTAR_PRODUTOS_P2 = {
 
 
 const FIXTURE_CONSULTAR_PRODUTO = {
-  codigo_produto: "PSAI-050",
-  codigo_produto_integracao: "101",
+  codigo_produto: "101",
+  codigo: "PSAI-050",
+  codigo_produto_integracao: "INT-101",
   descricao: "CHAPA PSAI CRISTAL 0,50 MM — 1000 X 2000 MM",
   unidade: "CH",
   ncm: "3920.30.00",
@@ -46,8 +47,9 @@ const FIXTURE_CONSULTAR_PRODUTO = {
 };
 
 const FIXTURE_CONSULTAR_PRODUTO_ACR = {
-  codigo_produto: "ACR-200",
-  codigo_produto_integracao: "201",
+  codigo_produto: "201",
+  codigo: "ACR-200",
+  codigo_produto_integracao: "INT-201",
   descricao: "CHAPA ACRILICO CRISTAL 2,00 MM — 1000 X 2000 MM",
   unidade: "CH",
   ncm: "3926.90.90",
@@ -1159,6 +1161,62 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
+  // 32. Filtro tipoItem=01: só matéria-prima aparece
+  // ----------------------------------------------------------
+  await teste('Filtro tipoItem: so materia-prima aparece, produto acabado nao', async () => {
+    setMockResponses({
+      produto_servico_cadastro: [
+        {codigo_produto: "501", codigo: "PSAI-MP", descricao: "CHAPA PSAI MATERIA PRIMA", unidade: "CH", ncm: "3920.30.00", valor_unitario: 50, tipoItem: "01", inativo: "N"},
+        {codigo_produto: "502", codigo: "PSAI-PA", descricao: "BANDEJA PSAI PRODUTO ACABADO", unidade: "UN", ncm: "3920.30.00", valor_unitario: 120, tipoItem: "04", inativo: "N"},
+        {codigo_produto: "503", codigo: "PSAI-INAT", descricao: "CHAPA PSAI INATIVA", unidade: "CH", ncm: "3920.30.00", valor_unitario: 45, tipoItem: "01", inativo: "S"},
+        {codigo_produto: "504", codigo: "MDF-MP", descricao: "CHAPA MDF MATERIA PRIMA", unidade: "CH", ncm: "4411.12.10", valor_unitario: 90, tipoItem: "01", inativo: "N"}
+      ],
+      total_de_paginas: 1, total_de_registros: 4, pagina: 1, registros_por_pagina: 200
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produtos?q=PSAI');
+    assert.strictEqual(r.status, 200);
+    // Deve retornar SOMENTE a MP ativa com PSAI
+    assert.strictEqual(r.body.produtos.length, 1);
+    assert.strictEqual(r.body.produtos[0].codigo, 'PSAI-MP');
+    assert.strictEqual(r.body.produtos[0].id, '501');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 33. Mapeamento codigo vs id: codigo=SKU, id=codigo_produto
+  // ----------------------------------------------------------
+  await teste('Mapeamento: id=codigo_produto (numerico), codigo=SKU', async () => {
+    // Force cache refresh with new data
+    setMockResponses({
+      produto_servico_cadastro: [{codigo_produto: "101", codigo: "PSAI-050", descricao: "CHAPA PSAI", unidade: "CH", ncm: "3920.30.00", valor_unitario: 45.80, tipoItem: "01", inativo: "N"}],
+      total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU"}]
+    });
+    await requisicaoLocal('POST', '/api/omie/test', {appKey: '1234567890', appSecret: 'segredo-secreto-123'});
+    await pausa();
+
+    setMockResponses({
+      produto_servico_cadastro: [
+        {codigo_produto: "1661181502", codigo: "PSAI-001", codigo_produto_integracao: "XYZ", descricao: "CHAPA PSAI TEST", unidade: "CH", ncm: "3920.30.00", valor_unitario: 50, tipoItem: "01", inativo: "N"}
+      ],
+      total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 200
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produtos?q=PSAI');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.produtos.length, 1);
+    assert.strictEqual(r.body.produtos[0].id, '1661181502');
+    assert.strictEqual(r.body.produtos[0].codigo, 'PSAI-001');
+    // NUNCA: codigo = '1661181502'
+    assert.notStrictEqual(r.body.produtos[0].codigo, '1661181502');
+  });
+
+  await pausa();
+
+    // ----------------------------------------------------------
   // RESULTADO FINAL
   // ----------------------------------------------------------
   await pararServidor();

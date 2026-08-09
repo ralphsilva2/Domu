@@ -114,12 +114,14 @@ function lerBody(req) {
 // ============================================================
 function mapProduto(p) {
   return {
-    id: String(p.codigo_produto_integracao || p.codigo_produto || ''),
-    codigo: String(p.codigo_produto || ''),
+    id: String(p.codigo_produto || ''),
+    codigo: String(p.codigo || ''),
     descricao: String(p.descricao || ''),
     unidade: String(p.unidade || ''),
     ncm: String(p.ncm || ''),
-    valorUnitario: Number(p.valor_unitario || 0)
+    valorUnitario: Number(p.valor_unitario || 0),
+    tipoItem: String(p.tipoItem || ''),
+    inativo: String(p.inativo || 'N')
   };
 }
 
@@ -137,10 +139,13 @@ async function carregarTodosProdutos() {
       pagina,
       registros_por_pagina: REGISTROS_POR_PAGINA,
       apenas_importado_api: 'N',
-      filtrar_apenas_omiepdv: 'N'
+      filtrar_apenas_omiepdv: 'N',
+      filtrar_apenas_tipo: '01'
     });
 
-    const lista = r.produto_servico_cadastro || [];
+    const lista = (r.produto_servico_cadastro || []).filter(p =>
+      String(p.tipoItem || '') === '01' && String(p.inativo || 'N') !== 'S'
+    );
     todos.push(...lista);
     totalPaginas = r.total_de_paginas || 1;
 
@@ -648,8 +653,8 @@ async function handler(req, res) {
       const p = (r.produto_servico_cadastro || [])[0] || {};
       const resultado = {
         connected: true,
-        produtoTesteCodigo: p.codigo_produto || '',
-        produtoTesteId: String(p.codigo_produto_integracao || p.codigo_produto || ''),
+        produtoTesteCodigo: p.codigo || p.codigo_produto || '',
+        produtoTesteId: String(p.codigo_produto || ''),
         custoTeste: p.valor_unitario || 0,
         appKeyMasked: appKey.slice(0, 4) + '****' + appKey.slice(-2)
       };
@@ -684,7 +689,7 @@ async function handler(req, res) {
 
       // Filtro local case insensitive em codigo E descricao
       const filtrados = todos.filter(p => {
-        const cod = String(p.codigo_produto || '').toLowerCase();
+        const cod = String(p.codigo || p.codigo_produto || '').toLowerCase();
         const desc = String(p.descricao || '').toLowerCase();
         return cod.includes(q) || desc.includes(q);
       });
@@ -717,7 +722,7 @@ async function handler(req, res) {
         const termoCategoria = categoria.replace(/-/g, ' ').replace(/chapa\s*/i, '');
         if (termoCategoria.length >= 2) {
           filtrados = todos.filter(p => {
-            const cod = String(p.codigo_produto || '').toLowerCase();
+            const cod = String(p.codigo || p.codigo_produto || '').toLowerCase();
             const desc = String(p.descricao || '').toLowerCase();
             return cod.includes(termoCategoria) || desc.includes(termoCategoria);
           });
@@ -771,7 +776,7 @@ async function handler(req, res) {
           const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
           if (r && r.codigo_produto) {
             produto = mapProduto(r);
-            idProd = r.codigo_produto_integracao || r.codigo_produto;
+            idProd = r.codigo_produto;
           }
         } catch (e) {
           log('DOMU', `ConsultarProduto por codigo falhou: ${e.message}`);
@@ -784,7 +789,7 @@ async function handler(req, res) {
           const r = await chamarOmie('geral/produtos/', 'ConsultarProduto', { codigo_produto_integracao: id });
           if (r && r.codigo_produto) {
             produto = mapProduto(r);
-            idProd = r.codigo_produto_integracao || r.codigo_produto;
+            idProd = r.codigo_produto;
           }
         } catch (e) {
           log('DOMU', `ConsultarProduto por id falhou: ${e.message}`);
