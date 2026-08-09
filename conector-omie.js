@@ -395,14 +395,55 @@ async function descobrirEstoqueDomu() {
 
 
 // ============================================================
-// BUSCA PROGRESSIVA DE MOVIMENTOS DE COMPRA
+// BUSCA HISTÓRICA DE MOVIMENTOS DE COMPRA — Arquitetura DOMU
 // ============================================================
-// Busca movimentos de compra (operacao 21/22) com janela progressiva:
-// 1 ano → 3 anos → 5 anos → 10 anos (máximo)
-// Só reporta "sem_ultima_compra" se nenhuma compra em 10 anos.
+// Janelas progressivas ~2 anos cada, até ~12 anos.
+// Paginação completa em cada janela.
+// Parser aceita movProdutoListar / movimentos / listaMovimentos.
+// Filtra operação 21/22, exclui cancelamento/devolução/qtde<=0.
+// Ordena por data mais recente.
 // ============================================================
+
+function extrairMovimentos(resposta) {
+  const lista =
+    resposta?.movProdutoListar ||
+    resposta?.movimentos ||
+    resposta?.listaMovimentos ||
+    [];
+  return Array.isArray(lista) ? lista : [];
+}
+
+function extrairTotalPaginas(resposta) {
+  return resposta?.nTotPaginas || resposta?.total_de_paginas || resposta?.totalPaginas || 1;
+}
+
+function obterOperacao(m) {
+  return String(m.operacao ?? m.cOperacao ?? '');
+}
+
+function obterIdMov(m) {
+  return m.idMov ?? m.nIdMov ?? 0;
+}
+
+function obterDtMov(m) {
+  return m.dtMov || m.dDtMov || m.dtEmissao || '';
+}
+
+function obterIdDoc(m) {
+  return m.idDoc ?? m.nIdDoc ?? 0;
+}
+
+function movimentoEhCompraValida(m) {
+  const op = obterOperacao(m);
+  if (!['21', '22'].includes(op)) return false;
+  if (String(m.cancelamento || 'N').toUpperCase() === 'S') return false;
+  if (String(m.devolucao || 'N').toUpperCase() === 'S') return false;
+  if ((m.qtde || 0) <= 0) return false;
+  return true;
+}
+
 async function buscarMovimentosCompra(idProd) {
-  const janelas = [1, 3, 5, 10]; // anos
+  const janelas = [2, 4, 6, 8, 10, 12]; // anos — janelas progressivas
 
   for (const anos of janelas) {
     const dtInicial = dataNAnosAtras(anos);
@@ -410,42 +451,48 @@ async function buscarMovimentosCompra(idProd) {
     log('OMIE', `ListarMovimentoEstoque idProd=${idProd} janela=${anos} ano(s) [${dtInicial} a ${dtFinal}]`);
 
     try {
-      const movResp = await chamarOmie('estoque/consulta/', 'ListarMovimentoEstoque', {
-        idProd: Number(idProd),
-        dDtInicial: dtInicial,
-        dDtFinal: dtFinal,
-        nPagina: 1,
-        nRegPorPagina: 500
-      });
+      let todosMovimentos = [];
+      let pagina = 1;
+      let totalPaginas = 1;
 
-      const movimentos = movResp.movimentos || [];
-      // Filtra: operacao 21 ou 22, exclui cancelamento=S
-      const compras = movimentos.filter(m =>
-        (m.operacao === '21' || m.operacao === '22') &&
-        m.cancelamento !== 'S'
-      );
+      do {
+        const movResp = await chamarOmie('estoque/consulta/', 'ListarMovimentoEstoque', {
+          idProd: Number(idProd),
+          dDtInicial: dtInicial,
+          dDtFinal: dtFinal,
+          nPagina: pagina,
+          nRegPorPagina: 500
+        });
+
+        const movimentos = extrairMovimentos(movResp);
+        todosMovimentos.push(...movimentos);
+        totalPaginas = extrairTotalPaginas(movResp);
+        pagina++;
+      } while (pagina <= totalPaginas);
+
+      // Filtra compras válidas
+      const compras = todosMovimentos.filter(movimentoEhCompraValida);
 
       if (compras.length > 0) {
-        // Ordena por dtEmissao desc (mais recente primeiro)
+        // Ordena por data mais recente
         compras.sort((a, b) => {
-          const dA = parseDataBR(a.dtEmissao);
-          const dB = parseDataBR(b.dtEmissao);
+          const dA = parseDataBR(obterDtMov(a));
+          const dB = parseDataBR(obterDtMov(b));
           return dB.getTime() - dA.getTime();
         });
 
         const movimentoCompra = compras[0];
-        log('OMIE', `Movimento compra encontrado na janela de ${anos} ano(s): idMov=${movimentoCompra.idMov} dtEmissao=${movimentoCompra.dtEmissao} numDoc=${movimentoCompra.numDoc}`);
+        log('OMIE', `Movimento compra encontrado na janela de ${anos} ano(s): idMov=${obterIdMov(movimentoCompra)} dt=${obterDtMov(movimentoCompra)} numDoc=${movimentoCompra.numDoc || ''}`);
         return movimentoCompra;
       }
 
       log('OMIE', `Nenhum movimento de compra em ${anos} ano(s), expandindo busca...`);
     } catch (e) {
-      // Se a API retornar erro (ex: periodo sem dados), continua para próxima janela
       log('OMIE', `ListarMovimentoEstoque falhou para janela ${anos} ano(s): ${e.message}`);
     }
   }
 
-  log('OMIE', 'Nenhum movimento de compra encontrado em 10 anos (maximo)');
+  log('OMIE', 'Nenhum movimento de compra encontrado em 12 anos (maximo)');
   return null;
 }
 
@@ -468,17 +515,17 @@ async function buscarMovimentosCompra(idProd) {
 // 5. PosicaoEstoque(idProd) → saldo, cmc, fisico, reservado
 // 6. Retorna resposta completa
 //
-// HIERARQUIA DE FALLBACK:
-// 1. "ultima_compra_nota_entrada" — nValUnit da ConsultarNotaEnt (PREFERIDO)
-// 2. "ultima_compra_movimento" — valor/qtde do movimento (se nota inacessivel)
-// 3. "sem_ultima_compra" — sem historico de compra (custoUnitario = 0)
+// HIERARQUIA:
+// 1. "ultima_compra" — nValUnit da ConsultarNotaEnt (PREFERIDO, contrato frontend)
+// 2. "movimento_estoque" — informação auxiliar (frontend NÃO usa como custo automático)
+// 3. "nao_encontrado" — sem historico de compra
 //
 // NUNCA usa valor_unitario do ConsultarProduto como custoUnitario.
 // ============================================================
 
 async function buscarUltimaCompra(idProd, codigoProduto) {
   const resultado = {
-    fonteCusto: 'sem_ultima_compra',
+    fonteCusto: 'nao_encontrado',
     custoUnitario: 0,
     custoLiquidoUnitario: 0,
     dataUltimaCompra: '',
@@ -504,7 +551,7 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
     descricaoProdutoNfe: ''
   };
 
-  // --- PASSO 2: Busca progressiva de movimentos de compra ---
+  // --- PASSO 2: Busca histórica de movimentos de compra ---
   let movimentoCompra = null;
   try {
     movimentoCompra = await buscarMovimentosCompra(idProd);
@@ -512,42 +559,33 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
     log('OMIE', `Busca de movimentos de compra falhou: ${e.message}`);
   }
 
-
   // --- PASSO 3: ConsultarNotaEnt (se movimento com idDoc) ---
-  let notaEncontrada = false;
-  if (movimentoCompra && movimentoCompra.idDoc) {
+  const idDocumento = movimentoCompra ? obterIdDoc(movimentoCompra) : 0;
+  if (movimentoCompra && idDocumento) {
     try {
-      // Omie API: ConsultarNotaEnt usa nCodNotaEnt
-      // O campo idDoc do movimento de estoque corresponde ao nCodNotaEnt da Nota de Entrada
-      // Documentação: POST /api/v1/produtos/notaentrada/ → ConsultarNotaEnt
-      log('OMIE', `ConsultarNotaEnt nCodNotaEnt=${movimentoCompra.idDoc}`);
+      log('OMIE', `ConsultarNotaEnt nCodNotaEnt=${idDocumento}`);
       const notaResp = await chamarOmie('produtos/notaentrada/', 'ConsultarNotaEnt', {
-        nCodNotaEnt: movimentoCompra.idDoc
+        nCodNotaEnt: idDocumento
       });
 
       const cabec = notaResp.cabec || {};
-      const produtos = notaResp.produtos || [];
+      const itens = notaResp.produtos || notaResp.itens || notaResp.produto_servico || [];
 
-      // Localiza item na nota pelo nCodProd
-      const itemNota = produtos.find(p => p.nCodProd === Number(idProd));
+      // Localiza item na nota pelo nCodProd ou codigo_produto
+      const itemNota = itens.find(p =>
+        Number(p.nCodProd ?? p.codigo_produto ?? 0) === Number(idProd)
+      );
 
       if (itemNota) {
-        // Validação cruzada: numDoc e dtEmissao
-        const numDocMatch = !cabec.cNumNFe || !movimentoCompra.numDoc || cabec.cNumNFe === movimentoCompra.numDoc;
-        const dtMatch = !cabec.dtEmissao || !movimentoCompra.dtEmissao || cabec.dtEmissao === movimentoCompra.dtEmissao;
-
-        if (!numDocMatch || !dtMatch) {
-          log('OMIE', `AVISO: Nota ${movimentoCompra.idDoc} diverge do movimento (numDoc: ${cabec.cNumNFe} vs ${movimentoCompra.numDoc}, dt: ${cabec.dtEmissao} vs ${movimentoCompra.dtEmissao}) — usando nota pois produto ${idProd} foi encontrado`);
-        }
-
-        resultado.fonteCusto = 'ultima_compra_nota_entrada';
-        resultado.custoUnitario = itemNota.nValUnit || 0;
-        resultado.custoLiquidoUnitario = itemNota.nValUnit || 0;
-        resultado.valorUnitarioNota = itemNota.nValUnit || 0;
-        resultado.dataUltimaCompra = cabec.dtEmissao || movimentoCompra.dtEmissao || '';
+        const nValUnit = itemNota.nValUnit || 0;
+        resultado.fonteCusto = 'ultima_compra';
+        resultado.custoUnitario = nValUnit;
+        resultado.custoLiquidoUnitario = nValUnit;
+        resultado.valorUnitarioNota = nValUnit;
+        resultado.dataUltimaCompra = cabec.dtEmissao || obterDtMov(movimentoCompra) || '';
         resultado.numeroNota = cabec.cNumNFe || movimentoCompra.numDoc || '';
         resultado.fornecedor = cabec.cNomeFornecedor || '';
-        resultado.idDocumentoOmie = String(movimentoCompra.idDoc || '');
+        resultado.idDocumentoOmie = String(idDocumento || '');
         resultado.idRecebimentoOmie = String(movimentoCompra.idRecebimento || '');
         resultado.codigoProdutoNfe = itemNota.cCodigo || codigoProduto || '';
         resultado.descricaoProdutoNfe = itemNota.cDescricao || '';
@@ -556,24 +594,16 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
         resultado.tributosOrigem = 'nota_entrada';
         resultado.fiscalCompraCompleto = true;
 
-        // Extrai tributos — campos oficiais da API Omie
-        // Aliquotas e valores separados
-        resultado.icmsAliquota = itemNota.ICMS?.nAliq ?? null;
-        resultado.icmsValor = itemNota.ICMS?.nValor ?? null;
-        resultado.ipiAliquota = itemNota.IPI?.nAliqIPI ?? null;
-        resultado.ipiValor = itemNota.IPI?.nValorIPI ?? null;
-        resultado.pisAliquota = itemNota.PIS?.nAliqPIS ?? null;
-        resultado.pisValor = itemNota.PIS?.nValorPIS ?? null;
-        resultado.cofinsAliquota = itemNota.COFINS?.nAliqCOFINS ?? null;
-        resultado.cofinsValor = itemNota.COFINS?.nValorCOFINS ?? null;
-        // Combined for backward compatibility with frontend
-        resultado.icms = resultado.icmsAliquota;
-        resultado.ipi = resultado.ipiAliquota;
-        resultado.pis = resultado.pisAliquota;
-        resultado.cofins = resultado.cofinsAliquota;
-        resultado.pisCofins = ((resultado.pisAliquota || 0) + (resultado.cofinsAliquota || 0)) || null;
+        // Extrai tributos
+        resultado.icms = itemNota.ICMS?.nAliq ?? null;
+        resultado.ipi = itemNota.IPI?.nAliqIPI ?? null;
+        const pisAliq = itemNota.PIS?.nAliqPIS ?? null;
+        const cofinsAliq = itemNota.COFINS?.nAliqCOFINS ?? null;
+        resultado.pisCofins = (pisAliq !== null || cofinsAliq !== null)
+          ? ((pisAliq || 0) + (cofinsAliq || 0)) || null
+          : null;
 
-        // Tratamento fiscal (custos)
+        // Tratamento fiscal
         if (itemNota.custos) {
           resultado.tratamentoFiscal = {
             cICMSCusto: itemNota.custos.cICMSCusto || 'N',
@@ -583,41 +613,36 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
           };
         }
 
-        notaEncontrada = true;
-        log('OMIE', `Nota entrada OK: nValUnit=${itemNota.nValUnit} NF=${cabec.cNumNFe}`);
+        log('OMIE', `Nota entrada OK: nValUnit=${nValUnit} NF=${cabec.cNumNFe}`);
       } else {
-        log('OMIE', `AVISO: Nota ${movimentoCompra.idDoc} nao contem produto idProd=${idProd} — nota incompativel`);
-        // Do NOT set notaEncontrada = true
-        // Fall through to the movement fallback
+        log('OMIE', `AVISO: Nota ${idDocumento} nao contem produto idProd=${idProd}`);
       }
     } catch (e) {
       log('OMIE', `ConsultarNotaEnt falhou: ${e.message}`);
     }
   }
 
-
-  // --- FALLBACK: usa valor do movimento se nota nao acessivel ---
-  if (!notaEncontrada && movimentoCompra) {
+  // --- FALLBACK: movimento_estoque (informação auxiliar, frontend NÃO usa como custo automático) ---
+  if (resultado.fonteCusto !== 'ultima_compra' && movimentoCompra) {
     const valorUnitRaw = (movimentoCompra.qtde && movimentoCompra.qtde > 0)
       ? movimentoCompra.valor / movimentoCompra.qtde
       : movimentoCompra.valor || 0;
-    // Arredonda para 2 casas decimais para evitar imprecisao de ponto flutuante
     const valorUnit = Math.round(valorUnitRaw * 100) / 100;
 
-    resultado.fonteCusto = 'ultima_compra_movimento';
+    resultado.fonteCusto = 'movimento_estoque';
     resultado.custoUnitario = valorUnit;
     resultado.custoLiquidoUnitario = valorUnit;
     resultado.valorUnitarioNota = valorUnit;
-    resultado.dataUltimaCompra = movimentoCompra.dtEmissao || movimentoCompra.dtMov || '';
+    resultado.dataUltimaCompra = obterDtMov(movimentoCompra) || '';
     resultado.numeroNota = movimentoCompra.numDoc || '';
-    resultado.idDocumentoOmie = String(movimentoCompra.idDoc || '');
+    resultado.idDocumentoOmie = String(idDocumento || '');
     resultado.idRecebimentoOmie = String(movimentoCompra.idRecebimento || '');
     resultado.criterioSelecao = 'maior_data_emissao';
     resultado.criterioVinculo = 'movimento_estoque';
     resultado.tributosOrigem = 'nao_disponivel';
     resultado.fiscalCompraCompleto = false;
 
-    log('OMIE', `Fallback movimento: valorUnit=${valorUnit.toFixed(2)} dtEmissao=${movimentoCompra.dtEmissao}`);
+    log('OMIE', `Fallback movimento: valorUnit=${valorUnit.toFixed(2)} dt=${obterDtMov(movimentoCompra)}`);
   }
 
   // --- PASSO 4: ConsultarRecebimento (se idRecebimento disponivel) ---
@@ -627,22 +652,16 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
       const recResp = await chamarOmie('produtos/recebimentonfe/', 'ConsultarRecebimento', {
         nIdReceb: movimentoCompra.idRecebimento
       });
-
       if (recResp) {
-        if (!resultado.fornecedor) {
-          resultado.fornecedor = recResp.cRazaoSocial || recResp.cNome || '';
-        }
-        if (!resultado.numeroNota && recResp.cNumeroNFe) {
-          resultado.numeroNota = recResp.cNumeroNFe;
-        }
+        if (!resultado.fornecedor) resultado.fornecedor = recResp.cRazaoSocial || recResp.cNome || '';
+        if (!resultado.numeroNota && recResp.cNumeroNFe) resultado.numeroNota = recResp.cNumeroNFe;
       }
     } catch (e) {
       log('OMIE', `ConsultarRecebimento falhou: ${e.message}`);
     }
   }
 
-
-  // --- PASSO 5: PosicaoEstoque ---
+  // --- PASSO 5: PosicaoEstoque (independente de última compra) ---
   if (codigoEstoqueDomu !== null) {
     try {
       log('OMIE', `PosicaoEstoque id_prod=${idProd} codigo_local_estoque=${codigoEstoqueDomu}`);
@@ -651,7 +670,6 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
         codigo_local_estoque: codigoEstoqueDomu,
         data: dataHoje()
       });
-
       if (estResp) {
         resultado.cmc = estResp.cmc || 0;
         resultado.saldo = estResp.saldo || 0;
@@ -664,7 +682,7 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
       log('OMIE', `PosicaoEstoque falhou: ${e.message}`);
     }
   } else {
-    log('OMIE', 'PosicaoEstoque ignorado: estoque DOMU nao identificado (codigo_local_estoque=null)');
+    log('OMIE', 'PosicaoEstoque ignorado: estoque DOMU nao identificado');
     resultado.dataEstoque = 'estoque_domu_nao_encontrado';
   }
 
@@ -1054,5 +1072,5 @@ server.listen(PORTA, () => {
 
 // Export para testes
 if (typeof module !== 'undefined') {
-  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, descobrirEstoqueDomu, pontuarProduto, normalizarBusca, normalizarCodigoBusca, produtoPertenceCategoria, REGRAS_CATEGORIA_MATERIAL, PORTA };
+  module.exports = { server, handler, chamarOmie, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, descobrirEstoqueDomu, extrairMovimentos, extrairTotalPaginas, movimentoEhCompraValida, pontuarProduto, normalizarBusca, normalizarCodigoBusca, produtoPertenceCategoria, REGRAS_CATEGORIA_MATERIAL, PORTA };
 }

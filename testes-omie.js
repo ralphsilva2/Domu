@@ -513,7 +513,7 @@ async function executarTestes() {
     assert.strictEqual(r.body.produto.id, '201');
     // valor_unitario do cadastro e 200, mas custoUnitario DEVE ser 146.36 da nota
     assert.strictEqual(r.body.produto.valorUnitario, 200.00);
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
     assert.strictEqual(r.body.compra.custoUnitario, 146.36);
     assert.strictEqual(r.body.compra.custoLiquidoUnitario, 146.36);
     assert.strictEqual(r.body.compra.valorUnitarioNota, 146.36);
@@ -800,7 +800,7 @@ async function executarTestes() {
     assert.strictEqual(r.body.produto.valorUnitario, 200.00);
     assert.strictEqual(r.body.compra.custoUnitario, 146.36);
     assert.notStrictEqual(r.body.compra.custoUnitario, 200.00);
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
   });
 
   await pausa();
@@ -823,7 +823,7 @@ async function executarTestes() {
 
     const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
     // Deve ter pego a nota 8500 (segunda compra), nao a cancelada
     assert.strictEqual(r.body.compra.custoUnitario, 144.00);
     assert.strictEqual(r.body.compra.numeroNota, '51000');
@@ -860,7 +860,7 @@ async function executarTestes() {
   // ----------------------------------------------------------
   // 22. Sem historico de compra — fonteCusto = sem_ultima_compra
   // ----------------------------------------------------------
-  await teste('Sem historico compra: fonteCusto=sem_ultima_compra, custoUnitario=0', async () => {
+  await teste('Sem historico compra: fonteCusto=nao_encontrado, custoUnitario=0', async () => {
     setMockRouter((parsed) => {
       const call = parsed.call;
       if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
@@ -871,7 +871,7 @@ async function executarTestes() {
 
     const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
-    assert.strictEqual(r.body.compra.fonteCusto, 'sem_ultima_compra');
+    assert.strictEqual(r.body.compra.fonteCusto, 'nao_encontrado');
     assert.strictEqual(r.body.compra.custoUnitario, 0);
     assert.strictEqual(r.body.compra.custoLiquidoUnitario, 0);
     assert.strictEqual(r.body.compra.dataUltimaCompra, '');
@@ -887,7 +887,7 @@ async function executarTestes() {
   // ----------------------------------------------------------
   // 23. Nota inacessivel — fallback para movimento (valor/qtde)
   // ----------------------------------------------------------
-  await teste('Nota inacessivel: fallback para ultima_compra_movimento', async () => {
+  await teste('Nota inacessivel: fallback para movimento_estoque', async () => {
     setMockRouter((parsed) => {
       const call = parsed.call;
       if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
@@ -903,7 +903,7 @@ async function executarTestes() {
 
     const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_movimento');
+    assert.strictEqual(r.body.compra.fonteCusto, 'movimento_estoque');
     // valor=1463.60, qtde=10 → unit=146.36
     assert.strictEqual(r.body.compra.custoUnitario, 146.36);
     assert.strictEqual(r.body.compra.criterioVinculo, 'movimento_estoque');
@@ -1025,7 +1025,7 @@ async function executarTestes() {
     const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
     // Deve ter encontrado a compra na segunda tentativa (3 anos)
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
     assert.strictEqual(r.body.compra.custoUnitario, 146.36);
     // Deve ter feito pelo menos 2 chamadas de ListarMovimentoEstoque
     const movCalls = mockCalls.filter(c => c.parsed && c.parsed.call === 'ListarMovimentoEstoque');
@@ -1049,7 +1049,7 @@ async function executarTestes() {
     });
     const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
     assert.strictEqual(r.body.compra.custoUnitario, 146.36);
   });
 
@@ -1079,7 +1079,7 @@ async function executarTestes() {
     const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
     // Should fallback to movement value since nota doesn't contain the product
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_movimento');
+    assert.strictEqual(r.body.compra.fonteCusto, 'movimento_estoque');
     assert.strictEqual(r.body.compra.custoUnitario, 146.36); // 1463.60 / 10
     assert.strictEqual(r.body.compra.criterioVinculo, 'movimento_estoque');
   });
@@ -1161,7 +1161,7 @@ async function executarTestes() {
     const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
     assert.strictEqual(r.status, 200);
     // Custo must still work (from nota)
-    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
     assert.strictEqual(r.body.compra.custoUnitario, 146.36);
     // PosicaoEstoque should NOT have been called (no fallback to 0)
     const estoqueCall = mockCalls.find(c => c.parsed && c.parsed.call === 'PosicaoEstoque');
@@ -1409,7 +1409,82 @@ async function executarTestes() {
 
   await pausa();
 
-    // ----------------------------------------------------------
+  // ----------------------------------------------------------
+  // 38. movProdutoListar: parser aceita formato alternativo do Omie
+  // ----------------------------------------------------------
+  await teste('Parser movProdutoListar: encontra ultima compra com formato alternativo Omie', async () => {
+    setMockResponses({
+      produto_servico_cadastro: [{codigo_produto: "101", codigo: "X", descricao: "X", unidade: "UN", inativo: "N"}],
+      total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [{codigo_local_estoque: 1, cDescricao: "ESTOQUE DOMU"}]
+    });
+    await requisicaoLocal('POST', '/api/omie/test', {appKey: '1234567890', appSecret: 'segredo-secreto-123'});
+    await pausa();
+
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return {
+        codigo_produto: "11835150482", codigo: "4084438",
+        descricao: "CHAPA PSAI BRANCO TRICAMADA 1,00 X 1000 X 2000MM",
+        unidade: "CH", ncm: "3920.30.00", valor_unitario: 32.30
+      };
+      if (call === 'ListarMovimentoEstoque') return {
+        movProdutoListar: [
+          { idMov: 90001, idDoc: 7001, idProd: 11835150482, dtMov: '15/07/2026', numDoc: '77001', operacao: '21', cancelamento: 'N', devolucao: 'N', qtde: 10, valor: 1000, idRecebimento: 5001 }
+        ],
+        nTotPaginas: 1
+      };
+      if (call === 'ConsultarNotaEnt') return {
+        cabec: { nIdNota: 7001, cNumNFe: "77001", dtEmissao: "15/07/2026", cNomeFornecedor: "Fornecedor PSAI" },
+        produtos: [
+          { nCodProd: 11835150482, cCodigo: "4084438", cDescricao: "CHAPA PSAI BRANCO TRICAMADA", nQtde: 10, nValUnit: 100.00, cNCM: "3920.30.00", ICMS: {nAliq: 12}, IPI: {nAliqIPI: 0}, PIS: {nAliqPIS: 1.65}, COFINS: {nAliqCOFINS: 7.60} }
+        ]
+      };
+      if (call === 'PosicaoEstoque') return { saldo: 0, cmc: 22.32, fisico: 0, reservado: 0 };
+      if (call === 'ConsultarRecebimento') return { cRazaoSocial: "Fornecedor PSAI Ltda" };
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r.body.compra.custoUnitario, 100.00);
+    assert.strictEqual(r.body.compra.valorUnitarioNota, 100.00);
+    assert.strictEqual(r.body.compra.numeroNota, '77001');
+    assert.strictEqual(r.body.compra.cmc, 22.32);
+    assert.strictEqual(r.body.compra.fiscalCompraCompleto, true);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 39. Contrato fonteCusto: backend NUNCA retorna 'ultima_compra_nota_entrada'
+  // ----------------------------------------------------------
+  await teste('Contrato fonteCusto: backend retorna "ultima_compra" (NAO "ultima_compra_nota_entrada")', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    // CONTRATO: fonteCusto DEVE ser exatamente 'ultima_compra'
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    // NUNCA deve ser 'ultima_compra_nota_entrada'
+    assert.notStrictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.notStrictEqual(r.body.compra.fonteCusto, 'ultima_compra_movimento');
+    assert(r.body.compra.custoUnitario > 0, 'custoUnitario deve ser > 0');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
   // RESULTADO FINAL
   // ----------------------------------------------------------
   await pararServidor();
