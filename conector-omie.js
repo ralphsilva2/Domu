@@ -15,6 +15,8 @@ const OMIE_BASE = '/api/v1/';
 const OMIE_HOST = 'app.omie.com.br';
 const TIMEOUT_MS = 25000;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+const CACHE_COMPRA_TTL_MS = 60 * 1000;
+const CACHE_ESTOQUE_TTL_MS = 30 * 1000;
 const MAX_RESULTADOS_BUSCA = 50;
 const REGISTROS_POR_PAGINA = 200;
 
@@ -26,7 +28,10 @@ let conectado = false;
 // Cache de produtos
 let cacheProdutos = [];
 let cacheTimestamp = 0;
-let cacheCarregando = false;
+let cacheProdutosEmAndamento = null;
+const cacheUltimaCompra = new Map();
+const cachePosicaoEstoque = new Map();
+const estoqueEmAndamento = new Map();
 
 // Codigo do local de estoque DOMU (descoberto via ListarLocaisEstoque)
 let codigoEstoqueDomu = null;
@@ -146,32 +151,57 @@ function executarComFila(fn) {
   });
 }
 
+function erroRateLimit(call, bloqueio) {
+  const err = new Error(`OMIE_RATE_LIMIT: ${call} bloqueado por mais ${bloqueio.retryAfterSeconds}s`);
+  err.isRateLimit = true;
+  err.rateLimitInfo = bloqueio;
+  return err;
+}
+
 // ============================================================
 // CHAMADA OMIE COM CIRCUIT BREAKER E FILA
 // ============================================================
 function chamarOmieProtegido(endpoint, call, param) {
   const bloqueio = verificarBloqueio(call);
-  if (bloqueio) {
-    const err = new Error(`OMIE_RATE_LIMIT: ${call} bloqueado por mais ${bloqueio.retryAfterSeconds}s`);
-    err.isRateLimit = true;
-    err.rateLimitInfo = bloqueio;
-    return Promise.reject(err);
-  }
-  return executarComFila(() => chamarOmie(endpoint, call, param).catch(e => {
-    const segundos = parseRateLimit(e.message);
-    if (segundos > 0) {
-      registrarBloqueio(call, segundos);
-      e.isRateLimit = true;
-      e.rateLimitInfo = { code: 'OMIE_RATE_LIMIT', method: call, retryAfterSeconds: segundos, blockedUntil: Date.now() + segundos * 1000 };
-    }
-    throw e;
-  }));
+  if (bloqueio) return Promise.reject(erroRateLimit(call, bloqueio));
+  return executarComFila(() => {
+    // Reavaliar ao sair da fila: chamadas enfileiradas antes do bloqueio
+    // não podem atingir o upstream depois que o método foi bloqueado.
+    const bloqueioNaExecucao = verificarBloqueio(call);
+    if (bloqueioNaExecucao) return Promise.reject(erroRateLimit(call, bloqueioNaExecucao));
+    return chamarOmie(endpoint, call, param).catch(e => {
+      const segundos = parseRateLimit(e.message);
+      if (segundos > 0) {
+        registrarBloqueio(call, segundos);
+        e.isRateLimit = true;
+        e.rateLimitInfo = { code: 'OMIE_RATE_LIMIT', method: call, retryAfterSeconds: segundos, blockedUntil: Date.now() + segundos * 1000 };
+      }
+      throw e;
+    });
+  });
 }
 
 // ============================================================
 // DEDUPLICAÇÃO — uma cadeia por produtoId
 // ============================================================
 const compraEmAndamento = new Map();
+
+function limparCachesOperacionais() {
+  cacheProdutos = [];
+  cacheTimestamp = 0;
+  cacheProdutosEmAndamento = null;
+  cacheUltimaCompra.clear();
+  cachePosicaoEstoque.clear();
+  estoqueEmAndamento.clear();
+  compraEmAndamento.clear();
+}
+
+function limparCachesConsultas() {
+  cacheUltimaCompra.clear();
+  cachePosicaoEstoque.clear();
+  estoqueEmAndamento.clear();
+  compraEmAndamento.clear();
+}
 
 
 function lerBody(req) {
@@ -250,8 +280,8 @@ function normalizarCodigoBusca(str) {
 
 function pontuarProduto(produto, consulta) {
   const termo = normalizarBusca(consulta);
-  const codigo = normalizarBusca(produto.codigo || produto.codigo_produto || '');
-  const codigoCompacto = normalizarCodigoBusca(produto.codigo || produto.codigo_produto || '');
+  const codigo = normalizarBusca(produto.codigo || '');
+  const codigoCompacto = normalizarCodigoBusca(produto.codigo || '');
   const termoCompacto = normalizarCodigoBusca(consulta);
   const descricao = normalizarBusca(produto.descricao || '');
 
@@ -327,24 +357,21 @@ async function obterProdutosCache(forceRefresh = false) {
     return cacheProdutos;
   }
 
-  if (cacheCarregando) {
-    log('CACHE', 'Aguardando carregamento em andamento...');
-    while (cacheCarregando) {
-      await new Promise(r => setTimeout(r, 200));
-    }
-    return cacheProdutos;
+  if (cacheProdutosEmAndamento) {
+    log('CACHE', 'Compartilhando carregamento em andamento...');
+    return cacheProdutosEmAndamento;
   }
 
-  cacheCarregando = true;
-  try {
+  cacheProdutosEmAndamento = (async () => {
     log('CACHE', 'Atualizando cache de produtos...');
-    cacheProdutos = await carregarTodosProdutos();
+    const produtos = await carregarTodosProdutos();
+    cacheProdutos = produtos;
     cacheTimestamp = Date.now();
     log('CACHE', `Cache atualizado: ${cacheProdutos.length} produtos`);
     return cacheProdutos;
-  } finally {
-    cacheCarregando = false;
-  }
+  })();
+  try { return await cacheProdutosEmAndamento; }
+  finally { cacheProdutosEmAndamento = null; }
 }
 
 // ============================================================
@@ -389,6 +416,11 @@ function jsonResponse(res, code, obj) {
 }
 
 function erroOmie(res, err) {
+  if (err.isRateLimit) {
+    const retryAfterSeconds = err.rateLimitInfo?.retryAfterSeconds || 60;
+    res.setHeader('Retry-After', String(retryAfterSeconds));
+    return jsonResponse(res, 429, { error: err.message, code: 'OMIE_RATE_LIMIT', retryAfterSeconds });
+  }
   if (err.isOmieFault) {
     return jsonResponse(res, 502, { error: `Omie: ${err.message}` });
   }
@@ -425,12 +457,53 @@ function dataNAnosAtras(n) {
   return `${dd}/${mm}/${yyyy}`;
 }
 
+function formatarDataBR(d) {
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+}
+
+function criarJanelasHistoricas(quantidade = 6, anosPorJanela = 2) {
+  const hoje = new Date();
+  const janelas = [];
+  let fim = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+  for (let i = 0; i < quantidade; i++) {
+    const inicio = new Date(hoje.getFullYear() - ((i + 1) * anosPorJanela), hoje.getMonth(), hoje.getDate());
+    janelas.push({ inicio: formatarDataBR(inicio), fim: formatarDataBR(fim), indice: i });
+    fim = new Date(inicio);
+    fim.setDate(fim.getDate() - 1);
+  }
+  return janelas;
+}
+
 // Converte DD/MM/YYYY para Date para comparacao
 function parseDataBR(str) {
   if (!str) return new Date(0);
   const partes = str.split('/');
   if (partes.length !== 3) return new Date(0);
   return new Date(Number(partes[2]), Number(partes[1]) - 1, Number(partes[0]));
+}
+
+function chaveEstoque(idProd) {
+  return `${String(idProd)}|${String(codigoEstoqueDomu)}|${dataHoje()}`;
+}
+
+async function obterPosicaoEstoque(idProd) {
+  if (!idProd) throw new Error('codigo_produto ausente para PosicaoEstoque');
+  if (codigoEstoqueDomu === null) return null;
+  const chave = chaveEstoque(idProd);
+  const cached = cachePosicaoEstoque.get(chave);
+  if (cached && Date.now() - cached.timestamp < CACHE_ESTOQUE_TTL_MS) return cached.valor;
+  if (estoqueEmAndamento.has(chave)) return estoqueEmAndamento.get(chave);
+  const promessa = chamarOmieProtegido('estoque/consulta/', 'PosicaoEstoque', {
+    id_prod: Number(idProd),
+    codigo_local_estoque: codigoEstoqueDomu,
+    data: dataHoje()
+  }).then(valor => {
+    cachePosicaoEstoque.set(chave, { timestamp: Date.now(), valor });
+    return valor;
+  });
+  estoqueEmAndamento.set(chave, promessa);
+  try { return await promessa; }
+  finally { estoqueEmAndamento.delete(chave); }
 }
 
 // ============================================================
@@ -464,6 +537,7 @@ async function descobrirEstoqueDomu() {
   } catch (e) {
     log('OMIE', `AVISO: ListarLocaisEstoque falhou: ${e.message}. Estoque NAO sera consultado.`);
     codigoEstoqueDomu = null;
+    throw e;
   }
 }
 
@@ -517,15 +591,15 @@ function movimentoEhCompraValida(m) {
 }
 
 async function buscarMovimentosCompra(idProd, diagnostico = null) {
-  // Janelas NÃO sobrepostas: 0-2, 2-4, 4-6, 6-8, 8-10, 10-12 anos
-  const janelas = [[0, 2], [2, 4], [4, 6], [6, 8], [8, 10], [10, 12]];
+  const janelas = criarJanelasHistoricas();
 
-  for (const [anosInicio, anosFim] of janelas) {
-    const dtInicial = dataNAnosAtras(anosFim);
-    const dtFinal = anosInicio === 0 ? dataHoje() : dataNAnosAtras(anosInicio);
-    log('OMIE', `ListarMovimentoEstoque idProd=${idProd} janela=${anosInicio}-${anosFim} anos [${dtInicial} a ${dtFinal}]`);
+  for (const janela of janelas) {
+    const dtInicial = janela.inicio;
+    const dtFinal = janela.fim;
+    const rotulo = `${janela.indice * 2}-${(janela.indice + 1) * 2}`;
+    log('OMIE', `ListarMovimentoEstoque idProd=${idProd} janela=${rotulo} anos [${dtInicial} a ${dtFinal}]`);
 
-    const registro = { inicio: dtInicial, fim: dtFinal, janela: `${anosInicio}-${anosFim}`, resultado: 'executando', quantidadeMovimentos: 0 };
+    const registro = { inicio: dtInicial, fim: dtFinal, janela: rotulo, resultado: 'executando', quantidadeMovimentos: 0 };
     if (diagnostico && diagnostico.janelasConsultadas) diagnostico.janelasConsultadas.push(registro);
 
     try {
@@ -556,30 +630,107 @@ async function buscarMovimentosCompra(idProd, diagnostico = null) {
         compras.sort((a, b) => parseDataBR(obterDtMov(b)).getTime() - parseDataBR(obterDtMov(a)).getTime());
         const movimentoCompra = compras[0];
         registro.resultado = 'compra_encontrada';
-        log('OMIE', `Movimento compra encontrado janela ${anosInicio}-${anosFim} anos: idMov=${obterIdMov(movimentoCompra)} dt=${obterDtMov(movimentoCompra)}`);
+        log('OMIE', `Movimento compra encontrado janela ${rotulo} anos: idMov=${obterIdMov(movimentoCompra)} dt=${obterDtMov(movimentoCompra)}`);
         return movimentoCompra;
       }
 
       registro.resultado = 'sem_registros';
-      log('OMIE', `Nenhuma compra na janela ${anosInicio}-${anosFim} anos, avancando...`);
+      log('OMIE', `Nenhuma compra na janela ${rotulo} anos, avancando...`);
     } catch (e) {
       // Rate limit: PARAR imediatamente
       if (e.isRateLimit) { registro.resultado = 'rate_limit'; throw e; }
       // "Não existem registros" = janela vazia, avançar normalmente
       if (/[Nn]ão existem registros/i.test(e.message)) {
         registro.resultado = 'sem_registros';
-        log('OMIE', `Janela ${anosInicio}-${anosFim} sem registros (Omie), avancando...`);
+        log('OMIE', `Janela ${rotulo} sem registros (Omie), avancando...`);
         continue;
       }
       // Outro erro técnico: PARAR
       registro.resultado = 'erro';
       registro.erro = e.message;
-      log('OMIE', `ListarMovimentoEstoque falhou janela ${anosInicio}-${anosFim}: ${e.message}`);
+      log('OMIE', `ListarMovimentoEstoque falhou janela ${rotulo}: ${e.message}`);
       throw e;
     }
   }
 
   log('OMIE', 'Nenhum movimento de compra encontrado em 12 anos');
+  return null;
+}
+
+function extrairRecebimentos(resposta) {
+  const lista = resposta?.recebimentos || resposta?.listaRecebimentos || resposta?.recebimentosEncontrados || [];
+  return Array.isArray(lista) ? lista : [];
+}
+
+function indicadorSim(obj, campos) {
+  return campos.some(campo => String(obj?.[campo] || '').toUpperCase() === 'S');
+}
+
+function entidadeInvalida(obj) {
+  if (!obj) return false;
+  if (indicadorSim(obj, ['cCancelado', 'cCancelada', 'cancelado', 'cancelada', 'cDevolvido', 'cDevolvida', 'devolvido', 'devolvida', 'cIgnorado', 'cIgnorar', 'ignorado'])) return true;
+  const status = normalizarBusca(obj.cStatus || obj.status || obj.cSituacao || obj.situacao || '');
+  return status.includes('cancel') || status.includes('devol') || status.includes('ignorado');
+}
+
+function cabecalhoRecebimento(recebimento) {
+  return recebimento?.recebimentoCabec || recebimento?.cabec || recebimento?.cabecalho || recebimento || {};
+}
+
+function itensRecebimento(recebimento) {
+  const itens = recebimento?.itens || recebimento?.itensRecebimento || recebimento?.produtos || [];
+  return Array.isArray(itens) ? itens : [];
+}
+
+function dataRecebimento(recebimento) {
+  const cabec = cabecalhoRecebimento(recebimento);
+  return cabec.dtEmissao || cabec.dEmissaoNFe || cabec.dtEntrada || cabec.dDataEntrada || recebimento.dtEmissao || '';
+}
+
+function localizarItemRecebimento(recebimento, idProd) {
+  if (entidadeInvalida(recebimento) || entidadeInvalida(cabecalhoRecebimento(recebimento))) return null;
+  return itensRecebimento(recebimento).find(item => {
+    const cabec = item?.itensCabec || item?.cabec || item || {};
+    return !entidadeInvalida(item) && !entidadeInvalida(cabec)
+      && Number(cabec.nIdProduto) === Number(idProd);
+  }) || null;
+}
+
+async function buscarRecebimentoCompra(idProd, diagnostico = null) {
+  for (const janela of criarJanelasHistoricas()) {
+    let pagina = 1;
+    let totalPaginas = 1;
+    const recebimentos = [];
+    do {
+      let resp;
+      try {
+        resp = await chamarOmieProtegido('produtos/recebimentonfe/', 'ListarRecebimentos', {
+          nPagina: pagina,
+          nRegistrosPorPagina: 200,
+          dtEmissaoDe: janela.inicio,
+          dtEmissaoAte: janela.fim,
+          cExibirDetalhes: 'S'
+        });
+      } catch (e) {
+        if (e.isRateLimit) throw e;
+        if (/[Nn]ão existem registros/i.test(e.message)) {
+          resp = { recebimentos: [], nTotPaginas: 1 };
+        } else {
+          throw e;
+        }
+      }
+      recebimentos.push(...extrairRecebimentos(resp));
+      totalPaginas = extrairTotalPaginas(resp);
+      pagina++;
+    } while (pagina <= totalPaginas);
+
+    const candidatos = recebimentos
+      .map(recebimento => ({ recebimento, item: localizarItemRecebimento(recebimento, idProd) }))
+      .filter(c => c.item)
+      .sort((a, b) => parseDataBR(dataRecebimento(b.recebimento)) - parseDataBR(dataRecebimento(a.recebimento)));
+    if (diagnostico?.recebimentosConsultados) diagnostico.recebimentosConsultados.push({ inicio: janela.inicio, fim: janela.fim, paginas: totalPaginas, candidatos: candidatos.length });
+    if (candidatos.length) return candidatos[0];
+  }
   return null;
 }
 
@@ -626,6 +777,7 @@ async function buscarUltimaCompra(idProd, codigoProduto, diagnostico = null) {
     fiscalCompraCompleto: false,
     tributosOrigem: '',
     valorUnitarioNota: 0,
+    valorUnitarioMovimento: 0,
     cmc: 0,
     saldo: 0,
     fisico: 0,
@@ -666,7 +818,7 @@ async function buscarUltimaCompra(idProd, codigoProduto, diagnostico = null) {
       );
 
       if (itemNota) {
-        const nValUnit = itemNota.nValUnit || 0;
+        const nValUnit = Number(itemNota.nValUnit || 0);
         resultado.fonteCusto = 'ultima_compra';
         resultado.custoUnitario = nValUnit;
         resultado.custoLiquidoUnitario = nValUnit;
@@ -708,6 +860,7 @@ async function buscarUltimaCompra(idProd, codigoProduto, diagnostico = null) {
       }
     } catch (e) {
       log('OMIE', `ConsultarNotaEnt falhou: ${e.message}`);
+      if (e.isRateLimit) throw e;
     }
   }
 
@@ -719,9 +872,9 @@ async function buscarUltimaCompra(idProd, codigoProduto, diagnostico = null) {
     const valorUnit = Math.round(valorUnitRaw * 100) / 100;
 
     resultado.fonteCusto = 'movimento_estoque';
-    resultado.custoUnitario = valorUnit;
-    resultado.custoLiquidoUnitario = valorUnit;
-    resultado.valorUnitarioNota = valorUnit;
+    resultado.custoUnitario = 0;
+    resultado.custoLiquidoUnitario = 0;
+    resultado.valorUnitarioMovimento = valorUnit;
     resultado.dataUltimaCompra = obterDtMov(movimentoCompra) || '';
     resultado.numeroNota = movimentoCompra.numDoc || '';
     resultado.idDocumentoOmie = String(idDocumento || '');
@@ -732,6 +885,39 @@ async function buscarUltimaCompra(idProd, codigoProduto, diagnostico = null) {
     resultado.fiscalCompraCompleto = false;
 
     log('OMIE', `Fallback movimento: valorUnit=${valorUnit.toFixed(2)} dt=${obterDtMov(movimentoCompra)}`);
+  }
+
+  // Fallback documental independente do movimento. É obrigatório quando o
+  // estoque não registra a entrada (inclusive cNaoGerarMovEstoque="S").
+  if (resultado.fonteCusto !== 'ultima_compra') {
+    const candidato = await buscarRecebimentoCompra(idProd, diagnostico);
+    if (candidato) {
+      const recebimento = candidato.recebimento;
+      const cabec = cabecalhoRecebimento(recebimento);
+      const itemCabec = candidato.item.itensCabec || candidato.item.cabec || candidato.item;
+      const preco = Number(itemCabec.nPrecoUnit || 0);
+      if (preco > 0) {
+        resultado.fonteCusto = 'ultima_compra';
+        resultado.custoUnitario = preco;
+        resultado.custoLiquidoUnitario = preco;
+        resultado.valorUnitarioNota = preco;
+        resultado.dataUltimaCompra = dataRecebimento(recebimento);
+        resultado.numeroNota = cabec.cNumeroNFe || cabec.cNumNFe || cabec.nNumeroNFe || '';
+        resultado.fornecedor = cabec.cRazaoSocial || cabec.cNomeFornecedor || cabec.cNome || '';
+        resultado.idRecebimentoOmie = String(cabec.nIdReceb || recebimento.nIdReceb || '');
+        resultado.codigoProdutoNfe = itemCabec.cCodigoProduto || itemCabec.cCodigo || codigoProduto || '';
+        resultado.descricaoProdutoNfe = itemCabec.cDescricaoProduto || itemCabec.cDescricao || '';
+        resultado.criterioSelecao = 'maior_data_emissao';
+        resultado.criterioVinculo = 'recebimento_item_id_interno';
+        resultado.tributosOrigem = 'recebimento_nfe';
+        resultado.icms = itemCabec.nAliqICMS ?? itemCabec.ICMS?.nAliq ?? null;
+        resultado.ipi = itemCabec.nAliqIPI ?? itemCabec.IPI?.nAliqIPI ?? null;
+        const pis = itemCabec.nAliqPIS ?? itemCabec.PIS?.nAliqPIS ?? null;
+        const cofins = itemCabec.nAliqCOFINS ?? itemCabec.COFINS?.nAliqCOFINS ?? null;
+        resultado.pisCofins = (pis !== null || cofins !== null) ? (Number(pis || 0) + Number(cofins || 0)) : null;
+        resultado.fiscalCompraCompleto = [resultado.icms, resultado.ipi, resultado.pisCofins].some(v => v !== null);
+      }
+    }
   }
 
   // --- PASSO 4: ConsultarRecebimento (se idRecebimento disponivel) ---
@@ -747,6 +933,7 @@ async function buscarUltimaCompra(idProd, codigoProduto, diagnostico = null) {
       }
     } catch (e) {
       log('OMIE', `ConsultarRecebimento falhou: ${e.message}`);
+      if (e.isRateLimit) throw e;
     }
   }
 
@@ -754,11 +941,7 @@ async function buscarUltimaCompra(idProd, codigoProduto, diagnostico = null) {
   if (codigoEstoqueDomu !== null) {
     try {
       log('OMIE', `PosicaoEstoque id_prod=${idProd} codigo_local_estoque=${codigoEstoqueDomu}`);
-      const estResp = await chamarOmieProtegido('estoque/consulta/', 'PosicaoEstoque', {
-        id_prod: Number(idProd),
-        codigo_local_estoque: codigoEstoqueDomu,
-        data: dataHoje()
-      });
+      const estResp = await obterPosicaoEstoque(idProd);
       if (estResp) {
         resultado.cmc = estResp.cmc || 0;
         resultado.saldo = estResp.saldo || 0;
@@ -769,6 +952,7 @@ async function buscarUltimaCompra(idProd, codigoProduto, diagnostico = null) {
       }
     } catch (e) {
       log('OMIE', `PosicaoEstoque falhou: ${e.message}`);
+      if (e.isRateLimit) throw e;
     }
   } else {
     log('OMIE', 'PosicaoEstoque ignorado: estoque DOMU nao identificado');
@@ -812,8 +996,13 @@ async function handler(req, res) {
     log('DOMU', 'POST /api/omie/test');
     try {
       const body = JSON.parse(await lerBody(req) || '{}');
-      if (body.appKey !== undefined) appKey = String(body.appKey).trim();
-      if (body.appSecret !== undefined) appSecret = String(body.appSecret).trim();
+      const novaKey = body.appKey === undefined ? null : String(body.appKey).trim();
+      const novoSecret = body.appSecret === undefined ? null : String(body.appSecret).trim();
+      // Ambos vazios significam reutilizar a sessão já configurada.
+      if (novaKey || novoSecret) {
+        appKey = novaKey || '';
+        appSecret = novoSecret || '';
+      }
 
       if (!appKey || !appSecret) {
         log('DOMU', '400 Credenciais ausentes');
@@ -821,7 +1010,7 @@ async function handler(req, res) {
       }
 
       log('OMIE', 'ListarProdutos pagina=1 registros=1 (teste)');
-      const r = await chamarOmie('geral/produtos/', 'ListarProdutos', {
+      const r = await chamarOmieProtegido('geral/produtos/', 'ListarProdutos', {
         pagina: 1,
         registros_por_pagina: 1,
         apenas_importado_api: 'N',
@@ -832,6 +1021,8 @@ async function handler(req, res) {
       // Limpa cache ao reconectar com novas credenciais
       cacheProdutos = [];
       cacheTimestamp = 0;
+      cacheUltimaCompra.clear();
+      cachePosicaoEstoque.clear();
 
       // Descobre o local de estoque DOMU
       await descobrirEstoqueDomu();
@@ -841,7 +1032,11 @@ async function handler(req, res) {
         connected: true,
         produtoTesteCodigo: p.codigo || p.codigo_produto || '',
         produtoTesteId: String(p.codigo_produto || ''),
-        custoTeste: p.valor_unitario || 0,
+        // O cadastro não prova última compra. Mantém o contrato do HTML sem
+        // apresentar valor_unitario como custo histórico.
+        custoTeste: 0,
+        numeroNotaTeste: '',
+        dataCompraTeste: '',
         appKeyMasked: appKey.slice(0, 4) + '****' + appKey.slice(-2)
       };
 
@@ -850,6 +1045,7 @@ async function handler(req, res) {
     } catch (e) {
       conectado = false;
       log('DOMU', `400 Erro: ${e.message}`);
+      if (e.isRateLimit) return erroOmie(res, e);
       return jsonResponse(res, 400, { error: e.message });
     }
   }
@@ -921,6 +1117,9 @@ async function handler(req, res) {
       const todos = await obterProdutosCache();
 
       // Passo 1: filtrar por regra de categoria
+      if (codigoEstoqueDomu === null) {
+        return jsonResponse(res, 503, { error: 'Estoque DOMU não identificado; não é possível confirmar materiais elegíveis.' });
+      }
       const candidatos = todos.filter(p => produtoPertenceCategoria(p, categoria));
       log('DOMU', `Categoria "${categoria}": ${candidatos.length} candidatos`);
 
@@ -929,31 +1128,18 @@ async function handler(req, res) {
       if (codigoEstoqueDomu !== null && candidatos.length > 0) {
         const resultados = await Promise.all(
           candidatos.map(async (p) => {
-            const idProd = p.codigo_produto || p.codigo_produto_integracao;
+            const idProd = p.codigo_produto;
             if (!idProd) return null;
-            try {
-              const est = await chamarOmieProtegido('estoque/consulta/', 'PosicaoEstoque', {
-                id_prod: Number(idProd),
-                codigo_local_estoque: codigoEstoqueDomu,
-                data: dataHoje()
-              });
-              const saldo = est.saldo || 0;
-              const fisico = est.fisico || 0;
-              if (saldo > 0 || fisico > 0) {
-                return { produto: p, saldo, fisico };
-              }
-              return null;
-            } catch (e) {
-              // Produto sem posição de estoque — não inclui
-              return null;
+            const est = await obterPosicaoEstoque(idProd);
+            const saldo = est?.saldo || 0;
+            const fisico = est?.fisico || 0;
+            if (saldo > 0 || fisico > 0) {
+              return { produto: p, saldo, fisico };
             }
+            return null;
           })
         );
         materiaisDisponiveis = resultados.filter(r => r !== null);
-      } else if (codigoEstoqueDomu === null) {
-        // Estoque DOMU não identificado: retorna candidatos sem filtro de estoque
-        log('DOMU', 'AVISO: Estoque DOMU nao identificado, retornando candidatos sem filtro de estoque');
-        materiaisDisponiveis = candidatos.map(p => ({ produto: p, saldo: 0, fisico: 0 }));
       }
 
       const produtos = materiaisDisponiveis.map(r => {
@@ -975,7 +1161,7 @@ async function handler(req, res) {
   // GET /api/omie/produto-compra?id=xxx&codigo=yyy
   // ============================================================
   // FLUXO "ÚLTIMA COMPRA":
-  // 1. ConsultarProduto → info do produto + idProd (codigo_produto_integracao)
+  // 1. Catálogo → resolve codigo visível para codigo_produto (ID interno)
   // 2. ListarMovimentoEstoque → filtra compras (op 21/22), mais recente
   // 3. ConsultarNotaEnt → nValUnit real da NF-e (PREFERIDO)
   //    FALLBACK: valor/qtde do movimento
@@ -1020,17 +1206,19 @@ async function handler(req, res) {
         }
       }
 
-      // Só chama ConsultarProduto se NÃO temos idProd (apenas codigo sem id)
+      // Resolve código visível pelo catálogo. Nunca o envia como codigo_produto,
+      // pois esse parâmetro pertence ao namespace do ID interno.
       if (!idProd && codigo) {
         try {
-          log('OMIE', `ConsultarProduto codigo_produto="${codigo}"`);
-          const r = await chamarOmieProtegido('geral/produtos/', 'ConsultarProduto', { codigo_produto: codigo });
-          if (r && r.codigo_produto) {
-            produto = mapProduto(r);
-            idProd = r.codigo_produto;
+          const todos = await obterProdutosCache();
+          const encontrado = todos.find(p => String(p.codigo || '') === String(codigo));
+          if (encontrado?.codigo_produto) {
+            produto = mapProduto(encontrado);
+            idProd = encontrado.codigo_produto;
           }
         } catch (e) {
-          log('DOMU', `ConsultarProduto por codigo falhou: ${e.message}`);
+          log('DOMU', `Resolução de código pelo catálogo falhou: ${e.message}`);
+          throw e;
         }
       }
 
@@ -1045,12 +1233,20 @@ async function handler(req, res) {
         if (compraEmAndamento.has(chaveDedup)) {
           compra = await compraEmAndamento.get(chaveDedup);
         } else {
-          const promessa = buscarUltimaCompra(idProd, produto ? produto.codigo : codigo);
+          const cachedCompra = cacheUltimaCompra.get(chaveDedup);
+          if (cachedCompra && Date.now() - cachedCompra.timestamp < CACHE_COMPRA_TTL_MS) {
+            compra = cachedCompra.valor;
+          } else {
+          const promessa = buscarUltimaCompra(idProd, produto ? produto.codigo : codigo).then(valor => {
+            cacheUltimaCompra.set(chaveDedup, { timestamp: Date.now(), valor });
+            return valor;
+          });
           compraEmAndamento.set(chaveDedup, promessa);
           try {
             compra = await promessa;
           } finally {
             compraEmAndamento.delete(chaveDedup);
+          }
           }
         }
         if (!compra.descricaoProdutoNfe && produto) {
@@ -1224,5 +1420,5 @@ server.listen(PORTA, () => {
 
 // Export para testes
 if (typeof module !== 'undefined') {
-  module.exports = { server, handler, chamarOmie, chamarOmieProtegido, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, descobrirEstoqueDomu, extrairMovimentos, extrairTotalPaginas, movimentoEhCompraValida, pontuarProduto, normalizarBusca, normalizarCodigoBusca, produtoPertenceCategoria, REGRAS_CATEGORIA_MATERIAL, circuitBreaker, registrarBloqueio, verificarBloqueio, parseRateLimit, compraEmAndamento, PORTA };
+  module.exports = { server, handler, chamarOmie, chamarOmieProtegido, mapProduto, obterProdutosCache, buscarUltimaCompra, buscarMovimentosCompra, buscarRecebimentoCompra, descobrirEstoqueDomu, obterPosicaoEstoque, extrairMovimentos, extrairRecebimentos, extrairTotalPaginas, movimentoEhCompraValida, pontuarProduto, normalizarBusca, normalizarCodigoBusca, produtoPertenceCategoria, REGRAS_CATEGORIA_MATERIAL, criarJanelasHistoricas, circuitBreaker, registrarBloqueio, verificarBloqueio, parseRateLimit, compraEmAndamento, limparCachesOperacionais, limparCachesConsultas, PORTA };
 }

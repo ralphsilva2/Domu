@@ -7,6 +7,8 @@
 const http = require('http');
 const https = require('https');
 const assert = require('assert');
+const fs = require('fs');
+const crypto = require('crypto');
 
 // ============================================================
 // FIXTURES — Dados realistas da API Omie
@@ -120,6 +122,32 @@ const FIXTURE_RECEBIMENTO = {
   nValorNFe: 3263.60
 };
 
+function fixtureListaRecebimentos({ preco = 25.50, naoGerar = 'N', pagina = 1, totalPaginas = 1, recebimentos = null } = {}) {
+  return {
+    recebimentos: recebimentos || [{
+      recebimentoCabec: {
+        nIdReceb: 88001,
+        cNumeroNFe: '99001',
+        dtEmissao: '20/07/2026',
+        cRazaoSocial: 'Fornecedor PSAI Ltda'
+      },
+      itens: [{ itensCabec: {
+        nIdProduto: 11835150482,
+        cCodigoProduto: '4084438',
+        cDescricaoProduto: 'CHAPA PSAI BRANCO TRICAMADA 1,00 X 1000 X 2000MM',
+        nPrecoUnit: preco,
+        cNaoGerarMovEstoque: naoGerar,
+        nAliqICMS: 12,
+        nAliqIPI: 0,
+        nAliqPIS: 1.65,
+        nAliqCOFINS: 7.6
+      } }]
+    }],
+    nPagina: pagina,
+    nTotPaginas: totalPaginas
+  };
+}
+
 const FIXTURE_MOVIMENTO_VAZIO = {
   movimentos: [],
   nPagina: 1,
@@ -163,11 +191,17 @@ const FIXTURE_NOTA_ENTRADA_8500 = {
 let mockResponses = [];
 let mockCallRouter = null;
 let mockCalls = [];
+let mockUpstreamAtual = 0;
+let mockUpstreamMaximo = 0;
+let concorrenciaMaximaMedida = 0;
+const chamadasReaisOmie = 0;
 
 const originalRequest = https.request;
 
 function instalarMock() {
   mockCalls = [];
+  mockUpstreamAtual = 0;
+  mockUpstreamMaximo = 0;
   https.request = function(opts, callback) {
     const callInfo = {
       hostname: opts.hostname,
@@ -181,6 +215,8 @@ function instalarMock() {
       _destroyed: false,
       write(data) { callInfo.body += data; },
       end() {
+        mockUpstreamAtual++;
+        mockUpstreamMaximo = Math.max(mockUpstreamMaximo, mockUpstreamAtual);
         let parsed = {};
         try { parsed = JSON.parse(callInfo.body); } catch(e) {}
         callInfo.parsed = parsed;
@@ -190,9 +226,15 @@ function instalarMock() {
         let statusCode = 200;
 
         // Use router if available, otherwise use queue
+        let delayMs = 0;
         if (mockCallRouter) {
           const routedResponse = mockCallRouter(parsed);
-          responseData = JSON.stringify(routedResponse);
+          if (routedResponse && Object.prototype.hasOwnProperty.call(routedResponse, '__mockBody')) {
+            delayMs = routedResponse.__delayMs || 0;
+            responseData = JSON.stringify(routedResponse.__mockBody);
+          } else {
+            responseData = JSON.stringify(routedResponse);
+          }
         } else if (mockResponses.length > 0) {
           const mock = mockResponses.shift();
           if (typeof mock === 'function') {
@@ -210,13 +252,13 @@ function instalarMock() {
               setImmediate(() => handler(responseData));
             }
             if (event === 'end') {
-              setImmediate(() => setImmediate(() => handler()));
+              setImmediate(() => setImmediate(() => { mockUpstreamAtual--; handler(); }));
             }
             return fakeRes;
           }
         };
 
-        if (callback) setImmediate(() => callback(fakeRes));
+        if (callback) setTimeout(() => callback(fakeRes), delayMs);
       },
       on(event, handler) { return fakeReq; },
       setTimeout(ms, handler) { return fakeReq; },
@@ -285,6 +327,10 @@ const resultados = [];
 async function teste(nome, fn) {
   testesTotal++;
   try {
+    try {
+      const carregado = require.cache[require.resolve('./conector-omie.js')];
+      carregado?.exports?.limparCachesConsultas?.();
+    } catch (_) {}
     await fn();
     testesOk++;
     resultados.push({ nome, ok: true });
@@ -380,7 +426,9 @@ async function executarTestes() {
     assert.strictEqual(r.body.connected, true);
     assert.strictEqual(r.body.produtoTesteCodigo, 'PSAI-050');
     assert.strictEqual(r.body.produtoTesteId, '101');
-    assert.strictEqual(r.body.custoTeste, 45.80);
+    assert.strictEqual(r.body.custoTeste, 0);
+    assert.strictEqual(r.body.numeroNotaTeste, '');
+    assert.strictEqual(r.body.dataCompraTeste, '');
     assert.strictEqual(r.body.appKeyMasked, '1234****90');
   });
 
@@ -638,15 +686,18 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
-  // 13. POST /api/omie/test — credenciais vazias retorna 400
+  // 13. POST /api/omie/test — credenciais vazias reutilizam sessão
   // ----------------------------------------------------------
-  await teste('POST /api/omie/test — credenciais vazias retorna 400', async () => {
+  await teste('POST /api/omie/test — credenciais vazias preservam sessão configurada', async () => {
+    setMockResponses({ produto_servico_cadastro: [FIXTURE_CONSULTAR_PRODUTO] }, { locaisEncontrados: [] });
     const r = await requisicaoLocal('POST', '/api/omie/test', {
       appKey: '',
       appSecret: ''
     });
-    assert.strictEqual(r.status, 400);
-    assert(r.body.error.length > 0);
+    assert.strictEqual(r.status, 200);
+    const chamada = mockCalls.find(c => c.parsed?.call === 'ListarProdutos');
+    assert.strictEqual(chamada.parsed.app_key, '1234567890');
+    assert.strictEqual(chamada.parsed.app_secret, 'segredo-secreto-123');
   });
 
   await pausa();
@@ -904,7 +955,8 @@ async function executarTestes() {
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.body.compra.fonteCusto, 'movimento_estoque');
     // valor=1463.60, qtde=10 → unit=146.36
-    assert.strictEqual(r.body.compra.custoUnitario, 146.36);
+    assert.strictEqual(r.body.compra.custoUnitario, 0);
+    assert.strictEqual(r.body.compra.valorUnitarioMovimento, 146.36);
     assert.strictEqual(r.body.compra.criterioVinculo, 'movimento_estoque');
     assert.strictEqual(r.body.compra.fiscalCompraCompleto, false);
     assert.strictEqual(r.body.compra.tributosOrigem, 'nao_disponivel');
@@ -1079,7 +1131,8 @@ async function executarTestes() {
     assert.strictEqual(r.status, 200);
     // Should fallback to movement value since nota doesn't contain the product
     assert.strictEqual(r.body.compra.fonteCusto, 'movimento_estoque');
-    assert.strictEqual(r.body.compra.custoUnitario, 146.36); // 1463.60 / 10
+    assert.strictEqual(r.body.compra.custoUnitario, 0);
+    assert.strictEqual(r.body.compra.valorUnitarioMovimento, 146.36); // auxiliar, nunca custo
     assert.strictEqual(r.body.compra.criterioVinculo, 'movimento_estoque');
   });
 
@@ -1616,7 +1669,8 @@ async function executarTestes() {
     const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=201&codigo=ACR-200');
     assert.strictEqual(r.status, 200);
     assert.strictEqual(r.body.compra.fonteCusto, 'movimento_estoque');
-    assert.strictEqual(r.body.compra.custoUnitario, 100);
+    assert.strictEqual(r.body.compra.custoUnitario, 0);
+    assert.strictEqual(r.body.compra.valorUnitarioMovimento, 100);
   });
 
   await pausa();
@@ -1988,24 +2042,17 @@ async function executarTestes() {
   // 58. Concorrência: máximo 3 chamadas simultâneas
   // ----------------------------------------------------------
   await teste('Concorrencia: maximo 3 chamadas simultaneas ao Omie', async () => {
-    let maxSimultaneo = 0;
-    let atual = 0;
-
-    setMockResponses({ produto_servico_cadastro: [{codigo_produto:"1",codigo:"X",descricao:"X",unidade:"UN",inativo:"N"}], total_de_paginas:1,total_de_registros:1,pagina:1,registros_por_pagina:1 }, { locaisEncontrados:[{codigo_local_estoque:1,cDescricao:"ESTOQUE DOMU"}] });
-    await requisicaoLocal('POST','/api/omie/test',{appKey:'1234567890',appSecret:'s'});
-    await pausa();
-
-    // Mock que rastreia concorrência
-    const originalWrite = https.request;
-    // Os mocks já interceptam, mas precisamos rastrear timing
-    // Usar o próprio mockCalls para contar
-    // Simplificação: verificar que a fila existe e MAX_CONCORRENCIA = 3
     const conector = require('./conector-omie.js');
-    // A verificação é estrutural: MAX_CONCORRENCIA está definido
-    assert(conector.PORTA === 3000, 'Conector carregado');
-    // O teste real é que a fila funciona — já verificado pelos outros testes que rodam sem deadlock
-    // Verificação documental: constante está correta
-    assert(true, 'Fila de concorrencia implementada com MAX=3');
+    mockCalls = [];
+    mockUpstreamAtual = 0;
+    mockUpstreamMaximo = 0;
+    setMockRouter(() => ({ __delayMs: 30, __mockBody: { ok: true } }));
+    await Promise.all(Array.from({ length: 12 }, (_, i) =>
+      conector.chamarOmieProtegido('teste/', `Concorrencia${i}`, { i })
+    ));
+    assert(mockUpstreamMaximo > 1, 'Teste deve observar concorrencia real');
+    assert(mockUpstreamMaximo <= 3, `Maximo observado ${mockUpstreamMaximo}, esperado <= 3`);
+    concorrenciaMaximaMedida = mockUpstreamMaximo;
   });
 
   await pausa();
@@ -2177,12 +2224,213 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
+  // 66. Caso real: sem movimento, resolve por ListarRecebimentos
+  // ----------------------------------------------------------
+  await teste('Fallback ListarRecebimentos: caso 4084438/11835150482 retorna 25.50', async () => {
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar: [], nTotPaginas: 1 };
+      if (parsed.call === 'ListarRecebimentos') return fixtureListaRecebimentos();
+      if (parsed.call === 'PosicaoEstoque') return { saldo: 0, fisico: 0, cmc: 22.32, reservado: 0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r.body.compra.custoUnitario, 25.50);
+    assert.strictEqual(r.body.compra.valorUnitarioNota, 25.50);
+    assert.strictEqual(r.body.compra.criterioVinculo, 'recebimento_item_id_interno');
+  });
+
+  await teste('Fallback aceita cNaoGerarMovEstoque=S', async () => {
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar: [], nTotPaginas: 1 };
+      if (parsed.call === 'ListarRecebimentos') return fixtureListaRecebimentos({ naoGerar: 'S' });
+      if (parsed.call === 'PosicaoEstoque') return { saldo: 0, fisico: 0, cmc: 0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(r.body.compra.custoUnitario, 25.50);
+  });
+
+  await teste('Movimento resolvido nao chama ListarRecebimentos', async () => {
+    mockCalls = [];
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (parsed.call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (parsed.call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      if (parsed.call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=201&codigo=ACR-200');
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra');
+    assert.strictEqual(mockCalls.filter(c => c.parsed?.call === 'ListarRecebimentos').length, 0);
+  });
+
+  await teste('ListarRecebimentos pagina completamente e encontra produto na pagina 2', async () => {
+    mockCalls = [];
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar: [], nTotPaginas: 1 };
+      if (parsed.call === 'ListarRecebimentos') {
+        const pagina = parsed.param[0].nPagina;
+        return pagina === 1
+          ? fixtureListaRecebimentos({ pagina: 1, totalPaginas: 2, recebimentos: [] })
+          : fixtureListaRecebimentos({ pagina: 2, totalPaginas: 2 });
+      }
+      if (parsed.call === 'PosicaoEstoque') return { saldo: 0, fisico: 0, cmc: 0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.body.compra.custoUnitario, 25.50);
+    const paginas = mockCalls.filter(c => c.parsed?.call === 'ListarRecebimentos').map(c => c.parsed.param[0].nPagina);
+    assert.deepStrictEqual(paginas.slice(0, 2), [1, 2]);
+  });
+
+  await teste('Recebimentos cancelados devolvidos e ignorados nao vencem documento valido', async () => {
+    const item = (preco, extra = {}) => ({
+      recebimentoCabec: { dtEmissao: extra.data, cNumeroNFe: extra.nf, cCancelado: extra.cancelado || 'N', cDevolvido: extra.devolvido || 'N' },
+      itens: [{ itensCabec: { nIdProduto: 11835150482, nPrecoUnit: preco, cIgnorado: extra.ignorado || 'N' } }]
+    });
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { movProdutoListar: [], nTotPaginas: 1 };
+      if (parsed.call === 'ListarRecebimentos') return { recebimentos: [
+        item(99, { data: '25/07/2026', cancelado: 'S', nf: 'CANCELADA' }),
+        item(88, { data: '24/07/2026', devolvido: 'S', nf: 'DEVOLVIDA' }),
+        item(77, { data: '23/07/2026', ignorado: 'S', nf: 'IGNORADA' }),
+        item(25.50, { data: '20/07/2026', nf: 'VALIDA' })
+      ], nTotPaginas: 1 };
+      if (parsed.call === 'PosicaoEstoque') return { saldo: 0, fisico: 0, cmc: 0 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=11835150482&codigo=4084438');
+    assert.strictEqual(r.body.compra.custoUnitario, 25.50);
+    assert.strictEqual(r.body.compra.numeroNota, 'VALIDA');
+  });
+
+  await teste('Erro tecnico de PosicaoEstoque impede catalogo parcial', async () => {
+    setMockResponses({ produto_servico_cadastro: [{ codigo_produto: '1', codigo: 'X', descricao: 'X', inativo: 'N' }] }, { locaisEncontrados: [{ codigo_local_estoque: 1, cDescricao: 'ESTOQUE DOMU' }] });
+    await requisicaoLocal('POST', '/api/omie/test', { appKey: '1234567890', appSecret: 's' });
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarProdutos') return { produto_servico_cadastro: [
+        { codigo_produto: '801', codigo: 'PSAI-1', descricao: 'CHAPA PSAI 1MM', inativo: 'N' },
+        { codigo_produto: '802', codigo: 'PSAI-2', descricao: 'CHAPA PSAI 2MM', inativo: 'N' }
+      ], total_de_paginas: 1 };
+      if (parsed.call === 'PosicaoEstoque' && parsed.param[0].id_prod === 801) return { saldo: 2, fisico: 2 };
+      if (parsed.call === 'PosicaoEstoque') return { faultstring: 'API bloqueada por consumo indevido. Tente novamente em 60 segundos.', faultcode: '0' };
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/materiais?categoria=chapa-psai');
+    assert.strictEqual(r.status, 429);
+    assert.strictEqual(r.body.produtos, undefined);
+    require('./conector-omie.js').circuitBreaker.clear();
+  });
+
+  await teste('Cache concorrente compartilha uma carga e propaga falha aos 5 consumidores', async () => {
+    const conector = require('./conector-omie.js');
+    conector.limparCachesOperacionais();
+    mockCalls = [];
+    setMockRouter(parsed => parsed.call === 'ListarProdutos'
+      ? { __delayMs: 20, __mockBody: { faultstring: 'Falha catalogo', faultcode: '500' } }
+      : {});
+    const resultadosFalha = await Promise.allSettled(Array.from({ length: 5 }, () => conector.obterProdutosCache(true)));
+    assert(resultadosFalha.every(r => r.status === 'rejected'));
+    assert.strictEqual(mockCalls.filter(c => c.parsed?.call === 'ListarProdutos').length, 1);
+  });
+
+  await teste('Breaker reavaliado na fila impede aguardantes de atingir upstream', async () => {
+    const conector = require('./conector-omie.js');
+    conector.circuitBreaker.clear();
+    mockCalls = [];
+    let upstream = 0;
+    setMockRouter(() => {
+      upstream++;
+      return upstream === 1
+        ? { __delayMs: 5, __mockBody: { faultstring: 'API bloqueada por consumo indevido. Tente novamente em 60 segundos.', faultcode: '0' } }
+        : { __delayMs: 40, __mockBody: { ok: true } };
+    });
+    await Promise.allSettled(Array.from({ length: 10 }, (_, i) => conector.chamarOmieProtegido('fila/', 'MetodoFila', { i })));
+    assert(upstream <= 3, `Somente chamadas já em execução podem atingir upstream; observado=${upstream}`);
+    assert(upstream < 10);
+    conector.circuitBreaker.clear();
+  });
+
+  await teste('Namespaces: integracao nunca substitui ID interno em PosicaoEstoque', async () => {
+    setMockResponses({ produto_servico_cadastro: [{ codigo_produto: '1', codigo: 'X', descricao: 'X', inativo: 'N' }] }, { locaisEncontrados: [{ codigo_local_estoque: 1, cDescricao: 'ESTOQUE DOMU' }] });
+    await requisicaoLocal('POST', '/api/omie/test', { appKey: '1234567890', appSecret: 's' });
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarProdutos') return { produto_servico_cadastro: [
+        { codigo_produto: '11835150482', codigo: '4084438', codigo_produto_integracao: 'EXT-1', descricao: 'CHAPA PSAI 1MM', inativo: 'N' },
+        { codigo: 'SEM-ID', codigo_produto_integracao: '999999', descricao: 'CHAPA PSAI 2MM', inativo: 'N' }
+      ], total_de_paginas: 1 };
+      if (parsed.call === 'PosicaoEstoque') return { saldo: 1, fisico: 1 };
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/materiais?categoria=chapa-psai');
+    assert.strictEqual(r.status, 200);
+    assert.deepStrictEqual(r.body.produtos.map(p => p.id), ['11835150482']);
+    const ids = mockCalls.filter(c => c.parsed?.call === 'PosicaoEstoque').map(c => c.parsed.param[0].id_prod);
+    assert.deepStrictEqual(ids, [11835150482]);
+  });
+
+  await teste('Rate limit em Nota Recebimento e Estoque propaga HTTP 429', async () => {
+    const cenarios = ['ConsultarNotaEnt', 'ConsultarRecebimento', 'PosicaoEstoque'];
+    for (const metodoBloqueado of cenarios) {
+      const conector = require('./conector-omie.js');
+      conector.circuitBreaker.clear();
+      conector.limparCachesConsultas();
+      setMockRouter(parsed => {
+        if (parsed.call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+        if (parsed.call === metodoBloqueado) return { faultstring: 'API bloqueada por consumo indevido. Tente novamente em 60 segundos.', faultcode: '0' };
+        if (parsed.call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+        if (parsed.call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+        if (parsed.call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+        return {};
+      });
+      const r = await requisicaoLocal('GET', '/api/omie/produto-compra?id=201&codigo=ACR-200');
+      assert.strictEqual(r.status, 429, `${metodoBloqueado} deve propagar rate limit`);
+      assert.strictEqual(r.body.code, 'OMIE_RATE_LIMIT');
+    }
+    require('./conector-omie.js').circuitBreaker.clear();
+  });
+
+  await teste('Compra e estoque simultaneos compartilham Promises in-flight', async () => {
+    const conector = require('./conector-omie.js');
+    conector.limparCachesConsultas();
+    mockCalls = [];
+    setMockRouter(parsed => {
+      if (parsed.call === 'ListarMovimentoEstoque') return { __delayMs: 20, __mockBody: FIXTURE_MOVIMENTO_ESTOQUE };
+      if (parsed.call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (parsed.call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      if (parsed.call === 'PosicaoEstoque') return { __delayMs: 20, __mockBody: FIXTURE_POSICAO_ESTOQUE };
+      return {};
+    });
+    const respostas = await Promise.all(Array.from({ length: 5 }, () =>
+      requisicaoLocal('GET', '/api/omie/produto-compra?id=201&codigo=ACR-200')
+    ));
+    assert(respostas.every(r => r.status === 200 && r.body.compra.custoUnitario === 146.36));
+    assert.strictEqual(mockCalls.filter(c => c.parsed?.call === 'ListarMovimentoEstoque').length, 1);
+    assert.strictEqual(mockCalls.filter(c => c.parsed?.call === 'PosicaoEstoque').length, 1);
+  });
+
+  await teste('Contrato lê HTML oficial e confirma hash/campos consumidos', async () => {
+    const htmlBuffer = fs.readFileSync('./domu_dashboard_completo_74.html');
+    assert.strictEqual(crypto.createHash('sha256').update(htmlBuffer).digest('hex'), 'd41065129d19030a0ead350bc34498249cf3029f8f87cdbd0c34aecc318b7f06');
+    const html = htmlBuffer.toString('utf8');
+    for (const endpoint of ['/api/omie/status', '/api/omie/test', '/api/omie/produtos', '/api/omie/materiais', '/api/omie/produto-compra']) assert(html.includes(endpoint));
+    for (const campo of ['fonteCusto', 'custoUnitario', 'dataUltimaCompra', 'numeroNota', 'cmc', 'saldo', 'valorUnitarioNota', 'criterioVinculo']) assert(html.includes(campo));
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
   // RESULTADO FINAL
   // ----------------------------------------------------------
   await pararServidor();
 
   console.log('\n  =============================================');
   console.log(`  RESULTADO: ${testesOk}/${testesTotal} testes passaram`);
+  console.log(`  CONCORRENCIA MAXIMA MEDIDA: ${concorrenciaMaximaMedida}`);
+  console.log(`  CHAMADAS REAIS OMIE: ${chamadasReaisOmie}`);
   if (testesFalha > 0) {
     console.log(`  FALHAS: ${testesFalha}`);
     resultados.filter(r => !r.ok).forEach(r => {
