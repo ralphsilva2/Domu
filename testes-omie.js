@@ -1021,6 +1021,144 @@ async function executarTestes() {
   await pausa();
 
   // ----------------------------------------------------------
+  // 28. Nota valida: produto encontrado e numDoc/dtEmissao batem
+  // ----------------------------------------------------------
+  await teste('Nota valida: produto encontrado e numDoc/dtEmissao batem', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA; // numDoc=54321, dtEmissao=08/07/2026 matches movement
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.custoUnitario, 146.36);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 29. Nota incompativel: produto NAO encontrado na nota → fallback movimento
+  // ----------------------------------------------------------
+  await teste('Nota incompativel: produto NAO encontrado na nota → fallback movimento', async () => {
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') {
+        // Nota exists but does NOT contain product 201
+        return {
+          cabec: { nIdNota: 9001, cNumNFe: "54321", dtEmissao: "08/07/2026", cNomeFornecedor: "Fornecedor X" },
+          produtos: [
+            {nCodProd: 999, cCodigo: "OUTRO-001", cDescricao: "OUTRO PRODUTO", nQtde: 5, nValUnit: 50.00, cNCM: "0000.00.00"}
+          ]
+        };
+      }
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    // Should fallback to movement value since nota doesn't contain the product
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_movimento');
+    assert.strictEqual(r.body.compra.custoUnitario, 146.36); // 1463.60 / 10
+    assert.strictEqual(r.body.compra.criterioVinculo, 'movimento_estoque');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 30. Estoque DOMU encontrado: usa codigo_local_estoque correto
+  // ----------------------------------------------------------
+  await teste('Estoque DOMU encontrado: usa codigo_local_estoque correto', async () => {
+    // Reconnect with DOMU estoque available
+    setMockResponses({
+      produto_servico_cadastro: [FIXTURE_CONSULTAR_PRODUTO],
+      total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [
+        {codigo_local_estoque: 5, cDescricao: "ESTOQUE GERAL"},
+        {codigo_local_estoque: 7, cDescricao: "ESTOQUE DOMU INDUSTRIAL"}
+      ]
+    });
+    await requisicaoLocal('POST', '/api/omie/test', {
+      appKey: '1234567890', appSecret: 'segredo-secreto-123'
+    });
+    await pausa();
+
+    // Now make a produto-compra call and check PosicaoEstoque uses codigo 7
+    mockCalls = [];
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      return {};
+    });
+
+    await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+
+    const estoqueCall = mockCalls.find(c => c.parsed && c.parsed.call === 'PosicaoEstoque');
+    assert(estoqueCall, 'Deve ter chamado PosicaoEstoque');
+    assert.strictEqual(estoqueCall.parsed.param[0].codigo_local_estoque, 7);
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
+  // 31. Estoque DOMU NAO encontrado: nao faz fallback para 0
+  // ----------------------------------------------------------
+  await teste('Estoque DOMU NAO encontrado: nao faz fallback para 0', async () => {
+    // Reconnect with NO DOMU estoque
+    setMockResponses({
+      produto_servico_cadastro: [FIXTURE_CONSULTAR_PRODUTO],
+      total_de_paginas: 1, total_de_registros: 1, pagina: 1, registros_por_pagina: 1
+    }, {
+      locaisEncontrados: [
+        {codigo_local_estoque: 5, cDescricao: "ESTOQUE GERAL"},
+        {codigo_local_estoque: 8, cDescricao: "ESTOQUE LOJA"}
+      ]
+    });
+    await requisicaoLocal('POST', '/api/omie/test', {
+      appKey: '1234567890', appSecret: 'segredo-secreto-123'
+    });
+    await pausa();
+
+    // Now make a produto-compra call
+    mockCalls = [];
+    setMockRouter((parsed) => {
+      const call = parsed.call;
+      if (call === 'ConsultarProduto') return FIXTURE_CONSULTAR_PRODUTO_ACR;
+      if (call === 'ListarMovimentoEstoque') return FIXTURE_MOVIMENTO_ESTOQUE;
+      if (call === 'ConsultarNotaEnt') return FIXTURE_NOTA_ENTRADA;
+      if (call === 'ConsultarRecebimento') return FIXTURE_RECEBIMENTO;
+      // PosicaoEstoque should NOT be called
+      if (call === 'PosicaoEstoque') return FIXTURE_POSICAO_ESTOQUE;
+      return {};
+    });
+
+    const r = await requisicaoLocal('GET', '/api/omie/produto-compra?codigo=ACR-200&id=201');
+    assert.strictEqual(r.status, 200);
+    // Custo must still work (from nota)
+    assert.strictEqual(r.body.compra.fonteCusto, 'ultima_compra_nota_entrada');
+    assert.strictEqual(r.body.compra.custoUnitario, 146.36);
+    // PosicaoEstoque should NOT have been called (no fallback to 0)
+    const estoqueCall = mockCalls.find(c => c.parsed && c.parsed.call === 'PosicaoEstoque');
+    assert(!estoqueCall, 'NAO deve chamar PosicaoEstoque quando estoque DOMU nao encontrado');
+    // dataEstoque should indicate the problem
+    assert.strictEqual(r.body.compra.dataEstoque, 'estoque_domu_nao_encontrado');
+  });
+
+  await pausa();
+
+  // ----------------------------------------------------------
   // RESULTADO FINAL
   // ----------------------------------------------------------
   await pararServidor();

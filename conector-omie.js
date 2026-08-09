@@ -29,7 +29,7 @@ let cacheTimestamp = 0;
 let cacheCarregando = false;
 
 // Codigo do local de estoque DOMU (descoberto via ListarLocaisEstoque)
-let codigoEstoqueDomu = 0;
+let codigoEstoqueDomu = null;
 
 
 // ============================================================
@@ -299,12 +299,12 @@ async function descobrirEstoqueDomu() {
       codigoEstoqueDomu = localDomu.codigo_local_estoque || localDomu.nCodLocalEstoque || 0;
       log('OMIE', `Local de estoque DOMU encontrado: codigo_local_estoque=${codigoEstoqueDomu}`);
     } else {
-      log('OMIE', 'AVISO: Local de estoque DOMU nao encontrado. Usando fallback codigo_local_estoque=0');
-      codigoEstoqueDomu = 0;
+      log('OMIE', 'AVISO: Local de estoque DOMU nao encontrado. Estoque NAO sera consultado.');
+      codigoEstoqueDomu = null; // null means not found, no fallback
     }
   } catch (e) {
-    log('OMIE', `AVISO: ListarLocaisEstoque falhou: ${e.message}. Usando fallback codigo_local_estoque=0`);
-    codigoEstoqueDomu = 0;
+    log('OMIE', `AVISO: ListarLocaisEstoque falhou: ${e.message}. Estoque NAO sera consultado.`);
+    codigoEstoqueDomu = null;
   }
 }
 
@@ -447,6 +447,14 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
       const itemNota = produtos.find(p => p.nCodProd === Number(idProd));
 
       if (itemNota) {
+        // Validação cruzada: numDoc e dtEmissao
+        const numDocMatch = !cabec.cNumNFe || !movimentoCompra.numDoc || cabec.cNumNFe === movimentoCompra.numDoc;
+        const dtMatch = !cabec.dtEmissao || !movimentoCompra.dtEmissao || cabec.dtEmissao === movimentoCompra.dtEmissao;
+
+        if (!numDocMatch || !dtMatch) {
+          log('OMIE', `AVISO: Nota ${movimentoCompra.idDoc} diverge do movimento (numDoc: ${cabec.cNumNFe} vs ${movimentoCompra.numDoc}, dt: ${cabec.dtEmissao} vs ${movimentoCompra.dtEmissao}) — usando nota pois produto ${idProd} foi encontrado`);
+        }
+
         resultado.fonteCusto = 'ultima_compra_nota_entrada';
         resultado.custoUnitario = itemNota.nValUnit || 0;
         resultado.custoLiquidoUnitario = itemNota.nValUnit || 0;
@@ -493,7 +501,9 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
         notaEncontrada = true;
         log('OMIE', `Nota entrada OK: nValUnit=${itemNota.nValUnit} NF=${cabec.cNumNFe}`);
       } else {
-        log('OMIE', `Item nCodProd=${idProd} nao encontrado na nota ${movimentoCompra.idDoc}`);
+        log('OMIE', `AVISO: Nota ${movimentoCompra.idDoc} nao contem produto idProd=${idProd} — nota incompativel`);
+        // Do NOT set notaEncontrada = true
+        // Fall through to the movement fallback
       }
     } catch (e) {
       log('OMIE', `ConsultarNotaEnt falhou: ${e.message}`);
@@ -548,24 +558,29 @@ async function buscarUltimaCompra(idProd, codigoProduto) {
 
 
   // --- PASSO 5: PosicaoEstoque ---
-  try {
-    log('OMIE', `PosicaoEstoque id_prod=${idProd} codigo_local_estoque=${codigoEstoqueDomu}`);
-    const estResp = await chamarOmie('estoque/consulta/', 'PosicaoEstoque', {
-      id_prod: Number(idProd),
-      codigo_local_estoque: codigoEstoqueDomu,
-      data: dataHoje()
-    });
+  if (codigoEstoqueDomu !== null) {
+    try {
+      log('OMIE', `PosicaoEstoque id_prod=${idProd} codigo_local_estoque=${codigoEstoqueDomu}`);
+      const estResp = await chamarOmie('estoque/consulta/', 'PosicaoEstoque', {
+        id_prod: Number(idProd),
+        codigo_local_estoque: codigoEstoqueDomu,
+        data: dataHoje()
+      });
 
-    if (estResp) {
-      resultado.cmc = estResp.cmc || 0;
-      resultado.saldo = estResp.saldo || 0;
-      resultado.fisico = estResp.fisico || 0;
-      resultado.reservado = estResp.reservado || 0;
-      resultado.dataEstoque = dataHoje();
-      log('OMIE', `Estoque: saldo=${resultado.saldo} cmc=${resultado.cmc} fisico=${resultado.fisico}`);
+      if (estResp) {
+        resultado.cmc = estResp.cmc || 0;
+        resultado.saldo = estResp.saldo || 0;
+        resultado.fisico = estResp.fisico || 0;
+        resultado.reservado = estResp.reservado || 0;
+        resultado.dataEstoque = dataHoje();
+        log('OMIE', `Estoque: saldo=${resultado.saldo} cmc=${resultado.cmc} fisico=${resultado.fisico}`);
+      }
+    } catch (e) {
+      log('OMIE', `PosicaoEstoque falhou: ${e.message}`);
     }
-  } catch (e) {
-    log('OMIE', `PosicaoEstoque falhou: ${e.message}`);
+  } else {
+    log('OMIE', 'PosicaoEstoque ignorado: estoque DOMU nao identificado (codigo_local_estoque=null)');
+    resultado.dataEstoque = 'estoque_domu_nao_encontrado';
   }
 
   return resultado;
