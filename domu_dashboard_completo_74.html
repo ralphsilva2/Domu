@@ -1674,7 +1674,7 @@ function mensagemErroOmie(erro) {
 }
 
 async function requisicaoOmie(url, opcoes = {}) {
-  const resposta = await fetch('http://localhost:3000' + url, {
+  const resposta = await fetch(url, {
     ...opcoes,
     headers: { 'Content-Type': 'application/json', ...(opcoes.headers || {}) }
   });
